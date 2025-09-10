@@ -14,7 +14,7 @@ apis:
   yahoo_finance:
     rate_limit: 2000  # requests per hour
   fred:
-    api_key: null  # Set this later
+    api_key: 85336a3b758e27d790e40cd0f808fd0e
   twitter:
     api_key: null  # Set this later
 
