@@ -1,0 +1,55 @@
+==================================================
+FINOGRAPH STRUCTURE ANALYSIS REPORT
+==================================================
+Generated: 2025-09-12 10:56:52
+
+📊 BASIC GRAPH STATISTICS
+------------------------------
+Nodes: 14
+Edges: 25
+Density: 0.2747
+Average degree: 1.79
+
+Node type distribution:
+  company: 5 (35.7%)
+  sector: 3 (21.4%)
+  economic: 6 (42.9%)
+
+🔗 CONNECTIVITY ANALYSIS
+------------------------------
+Connected: False
+Components: 5
+Largest component: 71.4%
+Average path length: 1.78
+Average clustering: 0.4238
+
+👥 COMMUNITY STRUCTURE
+------------------------------
+Communities detected: 7
+Modularity: 0.1395
+Community sizes: [2, 4, 4, 1, 1, 1, 1]
+
+🎯 KEY NODES FOR RISK ASSESSMENT
+------------------------------
+
+Top nodes by degree:
+  GOOGL (company): 0.6154
+  AAPL (company): 0.4615
+  AMZN (company): 0.4615
+
+Top nodes by betweenness:
+  GOOGL (company): 0.1026
+  Technology (sector): 0.1026
+  AAPL (company): 0.0769
+
+Top nodes by eigenvector:
+  GOOGL (company): 0.4508
+  AAPL (company): 0.3913
+  MSFT (company): 0.3913
+
+Top nodes by pagerank:
+  GOOGL (company): 0.1467
+  AAPL (company): 0.1248
+  MSFT (company): 0.1248
+
+==================================================
