@@ -106,37 +106,37 @@ class FinGraphDashboard:
             return _self._generate_fallback_dashboard_data(), None
         
     def _generate_fallback_dashboard_data(self):
-    """Generate fallback data when API and files are unavailable"""
-    import pandas as pd
-    from datetime import datetime
-    
-    # Sample risk data
-    risk_data = pd.DataFrame([
-        {'symbol': 'AAPL', 'risk_score': 0.299, 'risk_level': 'Low', 'volatility': 0.234},
-        {'symbol': 'MSFT', 'risk_score': 0.386, 'risk_level': 'Low', 'volatility': 0.238},
-        {'symbol': 'GOOGL', 'risk_score': 0.476, 'risk_level': 'Medium', 'volatility': 0.307},
-        {'symbol': 'AMZN', 'risk_score': 0.533, 'risk_level': 'Medium', 'volatility': 0.404},
-        {'symbol': 'TSLA', 'risk_score': 0.863, 'risk_level': 'High', 'volatility': 0.730}
-    ])
-    
-    # Sample summary data
-    dashboard_summary = {
-        'timestamp': datetime.now().isoformat(),
-        'risk_overview': {
-            'total_companies': 5,
-            'high_risk_count': 1,
-            'medium_risk_count': 2,
-            'low_risk_count': 2,
-            'average_risk_score': 0.511
-        },
-        'model_performance': {
-            'Logistic Regression': {'mse': 0.0302, 'rmse': 0.1738},
-            'Random Forest': {'mse': 0.0241, 'rmse': 0.1554},
-            'Simple GNN': {'mse': 0.0223, 'rmse': 0.1495}
+        """Generate fallback data when API and files are unavailable"""
+        import pandas as pd
+        from datetime import datetime
+        
+        # Sample risk data
+        risk_data = pd.DataFrame([
+            {'symbol': 'AAPL', 'risk_score': 0.299, 'risk_level': 'Low', 'volatility': 0.234},
+            {'symbol': 'MSFT', 'risk_score': 0.386, 'risk_level': 'Low', 'volatility': 0.238},
+            {'symbol': 'GOOGL', 'risk_score': 0.476, 'risk_level': 'Medium', 'volatility': 0.307},
+            {'symbol': 'AMZN', 'risk_score': 0.533, 'risk_level': 'Medium', 'volatility': 0.404},
+            {'symbol': 'TSLA', 'risk_score': 0.863, 'risk_level': 'High', 'volatility': 0.730}
+        ])
+        
+        # Sample summary data
+        dashboard_summary = {
+            'timestamp': datetime.now().isoformat(),
+            'risk_overview': {
+                'total_companies': 5,
+                'high_risk_count': 1,
+                'medium_risk_count': 2,
+                'low_risk_count': 2,
+                'average_risk_score': 0.511
+            },
+            'model_performance': {
+                'Logistic Regression': {'mse': 0.0302, 'rmse': 0.1738},
+                'Random Forest': {'mse': 0.0241, 'rmse': 0.1554},
+                'Simple GNN': {'mse': 0.0223, 'rmse': 0.1495}
+            }
         }
-    }
-    
-    return {'summary': dashboard_summary, 'predictions': risk_data}
+        
+        return {'summary': dashboard_summary, 'predictions': risk_data}
     
     def render_header(self):
         """Header with current results"""
