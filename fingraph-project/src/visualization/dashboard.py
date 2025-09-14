@@ -27,6 +27,7 @@ class FinGraphDashboard:
     """Dashboard that reads from your existing temporal_integration results"""
     
     def __init__(self):
+        self.api_url = os.environ.get("API_URL", "http://localhost:8000")
         self.data_dir = os.path.join(project_root, "data", "temporal_integration")
         self.risk_data = None
         self.dashboard_summary = None

@@ -12,6 +12,9 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
+import glob
+import statistics
+from collections import defaultdict
 
 # Add project root to path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -43,6 +46,26 @@ class HealthStatus(BaseModel):
     data_available: bool
     last_update: Optional[str]
     companies_count: int
+    
+class ModelPerformance(BaseModel):
+    model_name: str
+    mse: float
+    rmse: float
+    timestamp: str
+
+class DataDriftCheck(BaseModel):
+    status: str
+    risk_drift_percentage: float
+    volatility_drift_percentage: float
+    check_timestamp: str
+    threshold_exceeded: bool
+
+class SystemMonitoring(BaseModel):
+    api_status: str
+    data_freshness_hours: float
+    model_count: int
+    last_prediction_time: Optional[str]
+    system_uptime: str
 
 class DataLoader:
     """Loads from YOUR existing temporal_integration results"""
@@ -80,22 +103,107 @@ class DataLoader:
         except Exception as e:
             print(f"Error loading data: {e}")
             return False
+        
+    def get_model_performance_data(self):
+        """Extract model performance from your summary data"""
+        if not self.summary_data or 'model_performance' not in self.summary_data:
+            return []
+        
+        performance_list = []
+        for model_name, metrics in self.summary_data['model_performance'].items():
+            performance_list.append({
+                'model_name': model_name,
+                'mse': float(metrics.get('mse', 0.0)),
+                'rmse': float(metrics.get('rmse', 0.0)),
+                'timestamp': self.last_loaded.isoformat() if self.last_loaded else datetime.now().isoformat()
+            })
+        return performance_list
+    
+    def check_data_drift_status(self):
+        """Analyze your risk data for drift indicators"""
+        if self.risk_data is None or len(self.risk_data) == 0:
+            return {
+                'status': 'no_data',
+                'risk_drift_percentage': 0.0,
+                'volatility_drift_percentage': 0.0,
+                'check_timestamp': datetime.now().isoformat(),
+                'threshold_exceeded': False
+            }
+        
+        # Based on your actual data: AAPL=0.299, TSLA=0.863, avg=0.511
+        current_risk_avg = float(self.risk_data['risk_score'].mean())
+        expected_risk_avg = 0.511  # From your dashboard_summary
+        risk_drift = abs(current_risk_avg - expected_risk_avg) / expected_risk_avg * 100
+        
+        # Based on your actual volatility data  
+        current_vol_avg = float(self.risk_data['volatility'].mean())
+        expected_vol_avg = 0.35  # Estimated from your data range
+        vol_drift = abs(current_vol_avg - expected_vol_avg) / expected_vol_avg * 100
+        
+        drift_threshold = 15.0  # 15% drift threshold
+        threshold_exceeded = risk_drift > drift_threshold or vol_drift > drift_threshold
+        
+        status = 'warning' if threshold_exceeded else 'stable'
+        
+        return {
+            'status': status,
+            'risk_drift_percentage': float(risk_drift),
+            'volatility_drift_percentage': float(vol_drift),
+            'check_timestamp': datetime.now().isoformat(),
+            'threshold_exceeded': threshold_exceeded
+        }
+    
+    def get_system_monitoring_data(self):
+        """Get system health metrics"""
+        if self.last_loaded:
+            hours_since_load = (datetime.now() - self.last_loaded).total_seconds() / 3600
+            data_freshness = float(hours_since_load)
+        else:
+            data_freshness = 999.0  # Very stale
+        
+        model_count = len(self.summary_data.get('model_performance', {})) if self.summary_data else 0
+        
+        # System uptime (simplified - when data was last loaded)
+        uptime = f"{data_freshness:.1f} hours since data load"
+        
+        return {
+            'api_status': 'healthy' if data_freshness < 48 else 'stale',
+            'data_freshness_hours': data_freshness,
+            'model_count': model_count,
+            'last_prediction_time': self.last_loaded.isoformat() if self.last_loaded else None,
+            'system_uptime': uptime
+        }
 
 # Global data loader
 loader = DataLoader()
 
 @app.get("/", response_model=Dict)
 async def root():
-    """API root"""
+    """FinGraph API - Production-Ready Financial Risk Assessment"""
     return {
-        "message": "FinGraph API - Financial Risk Assessment",
+        "message": "FinGraph API - Financial Risk Assessment with Production Monitoring",
         "version": "1.0.0",
+        "status": "production-ready",
         "endpoints": {
-            "health": "/health",
-            "risk_all": "/risk",
-            "risk_company": "/risk/{symbol}",
-            "portfolio": "/portfolio"
-        }
+            "core": {
+                "health": "/health",
+                "risk_all": "/risk",
+                "risk_company": "/risk/{symbol}",
+                "portfolio": "/portfolio",
+                "alerts": "/alerts"
+            },
+            "monitoring": {
+                "performance": "/monitoring/performance",
+                "drift": "/monitoring/drift",
+                "system": "/monitoring/system",
+                "dashboard": "/monitoring/dashboard"
+            }
+        },
+        "documentation": {
+            "interactive": "/docs",
+            "redoc": "/redoc"
+        },
+        "data_source": "FinGraph Temporal Integration Results"
     }
 
 @app.get("/health", response_model=HealthStatus)
@@ -212,6 +320,84 @@ async def get_risk_alerts(threshold: float = Query(0.7, ge=0.0, le=1.0)):
         "alert_count": len(alerts),
         "alerts": alerts,
         "generated_at": datetime.now().isoformat()
+    }
+
+@app.get("/monitoring/performance", response_model=List[ModelPerformance])
+async def get_model_performance():
+    """Get model performance metrics from your temporal integration results"""
+    if not loader.load_results():
+        raise HTTPException(status_code=503, detail="No model performance data available. Run temporal integration first.")
+    
+    performance_data = loader.get_model_performance_data()
+    
+    if not performance_data:
+        raise HTTPException(status_code=404, detail="No performance metrics found in results")
+    
+    return [
+        ModelPerformance(
+            model_name=item['model_name'],
+            mse=item['mse'],
+            rmse=item['rmse'],
+            timestamp=item['timestamp']
+        )
+        for item in performance_data
+    ]
+
+@app.get("/monitoring/drift", response_model=DataDriftCheck)
+async def check_data_drift():
+    """Check for data drift in risk predictions"""
+    if not loader.load_results():
+        raise HTTPException(status_code=503, detail="No data available for drift analysis")
+    
+    drift_data = loader.check_data_drift_status()
+    
+    return DataDriftCheck(
+        status=drift_data['status'],
+        risk_drift_percentage=drift_data['risk_drift_percentage'],
+        volatility_drift_percentage=drift_data['volatility_drift_percentage'],
+        check_timestamp=drift_data['check_timestamp'],
+        threshold_exceeded=drift_data['threshold_exceeded']
+    )
+
+@app.get("/monitoring/system", response_model=SystemMonitoring)
+async def get_system_monitoring():
+    """Get overall system health and monitoring data"""
+    if not loader.load_results():
+        raise HTTPException(status_code=503, detail="System monitoring unavailable")
+    
+    system_data = loader.get_system_monitoring_data()
+    
+    return SystemMonitoring(
+        api_status=system_data['api_status'],
+        data_freshness_hours=system_data['data_freshness_hours'],
+        model_count=system_data['model_count'],
+        last_prediction_time=system_data['last_prediction_time'],
+        system_uptime=system_data['system_uptime']
+    )
+
+@app.get("/monitoring/dashboard")
+async def get_monitoring_dashboard():
+    """Complete monitoring dashboard data for operations team"""
+    if not loader.load_results():
+        raise HTTPException(status_code=503, detail="Monitoring dashboard unavailable")
+    
+    # Gather all monitoring data
+    performance = loader.get_model_performance_data()
+    drift = loader.check_data_drift_status()
+    system = loader.get_system_monitoring_data()
+    
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "overall_status": "healthy" if system['api_status'] == 'healthy' and drift['status'] == 'stable' else "warning",
+        "model_performance": performance,
+        "data_drift": drift,
+        "system_health": system,
+        "summary": {
+            "total_models": len(performance),
+            "best_model": min(performance, key=lambda x: x['mse'])['model_name'] if performance else None,
+            "drift_detected": drift['threshold_exceeded'],
+            "system_operational": system['api_status'] == 'healthy'
+        }
     }
 
 def run_server():
