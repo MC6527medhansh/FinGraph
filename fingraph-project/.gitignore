@@ -26,6 +26,7 @@ models/*.pkl
 .env
 *_api_key*
 secrets.yaml
+config.yaml
 
 # IDE files
 .vscode/
