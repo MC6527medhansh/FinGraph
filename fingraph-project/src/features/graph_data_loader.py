@@ -7,11 +7,12 @@ Handles all date parsing, correlation calculation, and data alignment issues
 import pandas as pd
 import numpy as np
 import logging
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 import os
 import glob
 import warnings
+import sys
 warnings.filterwarnings('ignore')
 
 logger = logging.getLogger(__name__)
@@ -40,34 +41,107 @@ class GraphDataLoader:
         self.economic_data = None
         self.relationship_data = None
         
-    def load_latest_data(self) -> Dict:
+    def load_latest_data(
+        self,
+        refresh_if_missing: bool = False,
+        max_age_hours: Optional[int] = 24,
+    ) -> Dict:
         """
-        Load the most recent data files with robust error handling
-        
+        Load the most recent data files with robust error handling.
+
+        Args:
+            refresh_if_missing: When True, run data collection if required files are
+                missing or older than ``max_age_hours``.
+            max_age_hours: Maximum allowed age for a data file. ``None`` disables
+                age checks.
+
         Returns:
-            Dictionary with loaded datasets
+            Dictionary with loaded datasets.
         """
         logger.info(f"📂 Loading data from {self.data_dir}")
-        
+
         # Find latest files (by timestamp in filename)
         stock_files = glob.glob(os.path.join(self.data_dir, 'stock_data_*.csv'))
         company_files = glob.glob(os.path.join(self.data_dir, 'company_info_*.csv'))
         economic_files = glob.glob(os.path.join(self.data_dir, 'economic_data_*.csv'))
         relationship_files = glob.glob(os.path.join(self.data_dir, 'relationship_data_*.csv'))
-        
-        if not stock_files:
+
+        file_candidates = {
+            'stock': stock_files,
+            'company': company_files,
+            'economic': economic_files,
+            'relationship': relationship_files,
+        }
+
+        latest_files = {
+            name: self._get_latest_file(paths)
+            for name, paths in file_candidates.items()
+        }
+
+        refresh_reasons = self._determine_refresh_reasons(latest_files, max_age_hours)
+        should_refresh = self._should_attempt_refresh(refresh_reasons)
+
+        if should_refresh and refresh_if_missing:
+            logger.info("🔄 Refresh requested: collecting fresh data before loading")
+            self._collect_fresh_data()
+
+            # Re-scan after refreshing
+            stock_files = glob.glob(os.path.join(self.data_dir, 'stock_data_*.csv'))
+            company_files = glob.glob(os.path.join(self.data_dir, 'company_info_*.csv'))
+            economic_files = glob.glob(os.path.join(self.data_dir, 'economic_data_*.csv'))
+            relationship_files = glob.glob(os.path.join(self.data_dir, 'relationship_data_*.csv'))
+
+            file_candidates = {
+                'stock': stock_files,
+                'company': company_files,
+                'economic': economic_files,
+                'relationship': relationship_files,
+            }
+            latest_files = {
+                name: self._get_latest_file(paths)
+                for name, paths in file_candidates.items()
+            }
+            refresh_reasons = self._determine_refresh_reasons(latest_files, max_age_hours)
+            should_refresh = self._should_attempt_refresh(refresh_reasons)
+
+        if should_refresh:
+            stock_reason = refresh_reasons.get('stock')
+            if stock_reason:
+                raise FileNotFoundError(
+                    "Stock data is missing or outdated. Run data collection or enable refresh to fetch new data."
+                )
+
+            for dataset, reason in refresh_reasons.items():
+                if dataset == 'stock':
+                    continue
+                logger.warning(
+                    "Data for %s is %s. Continuing with available information.",
+                    dataset,
+                    reason,
+                )
+        else:
+            # Even if we don't refresh, warn about any missing optional datasets
+            for dataset, reason in refresh_reasons.items():
+                if dataset == 'stock':
+                    continue
+                logger.warning(
+                    "Data for %s is %s. Continuing with available information.",
+                    dataset,
+                    reason,
+                )
+
+        latest_stock = latest_files.get('stock')
+        latest_company = latest_files.get('company')
+        latest_economic = latest_files.get('economic')
+        latest_relationship = latest_files.get('relationship')
+
+        if not latest_stock:
             raise FileNotFoundError("No stock data files found. Run data collection first!")
-        
-        # Get latest files
-        latest_stock = max(stock_files, key=os.path.getctime)
-        latest_company = max(company_files, key=os.path.getctime) if company_files else None
-        latest_economic = max(economic_files, key=os.path.getctime) if economic_files else None
-        latest_relationship = max(relationship_files, key=os.path.getctime) if relationship_files else None
-        
+
         # Load data with proper date handling
         logger.info(f"Loading stock data: {os.path.basename(latest_stock)}")
         self.stock_data = self._load_stock_data(latest_stock)
-        
+
         if latest_company:
             logger.info(f"Loading company info: {os.path.basename(latest_company)}")
             self.company_info = pd.read_csv(latest_company)
@@ -89,7 +163,75 @@ class GraphDataLoader:
             'economic_data': self.economic_data,
             'relationship_data': self.relationship_data
         }
-    
+
+    def _get_latest_file(self, files: List[str]) -> Optional[str]:
+        """Return the most recent file from a list of candidates."""
+
+        return max(files, key=os.path.getctime) if files else None
+
+    def _determine_refresh_reasons(
+        self,
+        latest_files: Dict[str, Optional[str]],
+        max_age_hours: Optional[int],
+    ) -> Dict[str, str]:
+        """Determine if any required refresh conditions are met."""
+
+        reasons: Dict[str, str] = {}
+        for dataset, file_path in latest_files.items():
+            if not file_path:
+                reasons[dataset] = 'missing'
+                continue
+
+            if max_age_hours is None:
+                continue
+
+            if self._is_file_outdated(file_path, max_age_hours):
+                reasons[dataset] = 'outdated'
+
+        return reasons
+
+    def _should_attempt_refresh(self, refresh_reasons: Dict[str, str]) -> bool:
+        """Decide whether a refresh should be attempted based on reasons."""
+
+        if not refresh_reasons:
+            return False
+
+        if refresh_reasons.get('stock'):
+            return True
+
+        return any(reason == 'outdated' for reason in refresh_reasons.values())
+
+    def _is_file_outdated(self, file_path: str, max_age_hours: int) -> bool:
+        """Check if a file exceeds the allowed age threshold."""
+
+        if max_age_hours <= 0:
+            return True
+
+        modified_time = datetime.fromtimestamp(os.path.getmtime(file_path))
+        age = datetime.now() - modified_time
+        return age > timedelta(hours=max_age_hours)
+
+    def _collect_fresh_data(self) -> None:
+        """Invoke the data collection routine to refresh raw data files."""
+
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+        if project_root not in sys.path:
+            sys.path.append(project_root)
+
+        try:
+            from scripts.collect_data import FinGraphDataCollector
+        except ImportError as exc:
+            logger.error("Unable to import data collector: %s", exc)
+            raise
+
+        try:
+            collector = FinGraphDataCollector()
+            collector.collect_all_data()
+            logger.info("✅ Fresh data collected successfully")
+        except Exception as exc:
+            logger.error("Failed to collect fresh data: %s", exc)
+            raise
+
     def _load_stock_data(self, file_path: str) -> pd.DataFrame:
         """Load stock data with proper date parsing"""
         try:
