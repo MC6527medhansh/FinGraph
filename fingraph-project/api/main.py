@@ -21,6 +21,8 @@ import logging
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(project_root)
 
+PERFORMANCE_FILE = os.path.join(project_root, "models", "performance.json")
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -211,29 +213,55 @@ class RealTimeRiskCalculator:
         logger.info(f"📊 Calculated risk for {len(risk_data)} companies")
         return risk_data
     
-    def get_model_performance_data(self):
-        """Generate realistic model performance metrics"""
-        # Add some variation to make it look real
-        base_mse = 0.022
-        variation = np.random.uniform(-0.002, 0.002)
-        
-        return {
-            'Logistic Regression': {
-                'mse': round(base_mse + 0.008 + variation, 6),
-                'rmse': round(np.sqrt(base_mse + 0.008 + variation), 6)
-            },
-            'Random Forest': {
-                'mse': round(base_mse + 0.002 + variation * 0.8, 6),
-                'rmse': round(np.sqrt(base_mse + 0.002 + variation * 0.8), 6)
-            },
-            'Simple GNN': {
-                'mse': round(base_mse + variation * 0.5, 6),
-                'rmse': round(np.sqrt(base_mse + variation * 0.5), 6)
-            }
-        }
-
 # Global calculator instance
 risk_calculator = RealTimeRiskCalculator()
+
+
+def load_saved_model_performance() -> Dict:
+    """Load persisted model performance metrics from disk."""
+    if not os.path.exists(PERFORMANCE_FILE):
+        logger.warning(f"Performance metrics file not found at {PERFORMANCE_FILE}")
+        return {}
+
+    try:
+        with open(PERFORMANCE_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        if not isinstance(data, dict):
+            logger.warning("Performance metrics file has unexpected format")
+            return {}
+
+        metrics = data.get('metrics') if isinstance(data, dict) else None
+
+        if isinstance(metrics, dict):
+            normalised_metrics = {}
+            for model_name, values in metrics.items():
+                if not isinstance(values, dict):
+                    continue
+
+                entry = {}
+                mse_value = values.get('mse')
+                if mse_value is not None:
+                    entry['mse'] = float(mse_value)
+
+                rmse_value = values.get('rmse')
+                if rmse_value is not None:
+                    entry['rmse'] = float(rmse_value)
+                elif mse_value is not None:
+                    entry['rmse'] = float(np.sqrt(mse_value))
+
+                normalised_metrics[model_name] = entry
+
+            data['metrics'] = normalised_metrics
+
+        return data
+
+    except json.JSONDecodeError as decode_error:
+        logger.error(f"Invalid JSON in performance metrics file: {decode_error}")
+    except Exception as exc:
+        logger.error(f"Failed to load performance metrics: {exc}")
+
+    return {}
 
 @app.get("/", response_model=Dict)
 async def root():
@@ -372,7 +400,7 @@ async def get_portfolio_summary():
         "average_risk_score": float(df['risk_score'].mean()),
         "average_volatility": float(df['volatility'].mean()),
         "high_momentum_stocks": df.nlargest(3, 'momentum_5d')[['symbol', 'momentum_5d']].to_dict('records'),
-        "model_performance": risk_calculator.get_model_performance_data(),
+        "model_performance": load_saved_model_performance(),
         "market_summary": {
             "most_risky": df.nlargest(1, 'risk_score').iloc[0]['symbol'],
             "least_risky": df.nsmallest(1, 'risk_score').iloc[0]['symbol'],
