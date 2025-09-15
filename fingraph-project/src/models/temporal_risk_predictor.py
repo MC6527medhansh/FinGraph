@@ -7,6 +7,9 @@ This version properly handles MultiIndex columns from Yahoo Finance
 
 import sys
 import os
+import json
+from pathlib import Path
+
 sys.path.append(os.path.join(os.path.dirname(__file__), '../..'))
 
 import pandas as pd
@@ -860,15 +863,45 @@ class TemporalRiskPredictor:
             for model_name, metrics in self.results.items():
                 if isinstance(metrics, dict) and 'mse' in metrics:
                     logger.info(f"  {model_name}: {metrics['mse']:.4f}")
-            
+
             # Find best model
-            model_scores = {name: metrics['mse'] for name, metrics in self.results.items() 
+            model_scores = {name: metrics['mse'] for name, metrics in self.results.items()
                            if isinstance(metrics, dict) and 'mse' in metrics}
             best_model = min(model_scores, key=model_scores.get)
             logger.info(f"🏆 Best model: {best_model}")
-            
+
+            # Persist evaluation metrics for downstream services
+            performance_summary = {
+                'generated_at': datetime.utcnow().isoformat(),
+                'best_model': best_model,
+                'metrics': {
+                    'Logistic Regression': {
+                        'mse': float(mse_logistic),
+                        'rmse': float(np.sqrt(mse_logistic))
+                    },
+                    'Random Forest': {
+                        'mse': float(mse_rf),
+                        'rmse': float(np.sqrt(mse_rf))
+                    },
+                    'Simple GNN': {
+                        'mse': float(mse_gnn),
+                        'rmse': float(np.sqrt(mse_gnn))
+                    }
+                }
+            }
+
+            try:
+                performance_dir = Path(__file__).resolve().parents[2] / 'models'
+                performance_dir.mkdir(parents=True, exist_ok=True)
+                performance_path = performance_dir / 'performance.json'
+                with performance_path.open('w', encoding='utf-8') as f:
+                    json.dump(performance_summary, f, indent=4)
+                logger.info(f"💾 Saved performance metrics to {performance_path}")
+            except Exception as save_error:
+                logger.error(f"❌ Failed to save performance metrics: {save_error}")
+
             return True
-            
+
         except Exception as e:
             logger.error(f"❌ Evaluation failed: {e}")
             return False

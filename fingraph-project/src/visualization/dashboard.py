@@ -155,32 +155,73 @@ class FinGraphDashboard:
     def render_model_performance(self):
         """Model performance from live API"""
         st.markdown("## 🤖 Live Model Performance")
-        
+
         if self.dashboard_summary and 'model_performance' in self.dashboard_summary:
-            perf = self.dashboard_summary['model_performance']
-            
-            if perf:
-                # Create comparison table
-                models = list(perf.keys())
-                mse_scores = [perf[m]['mse'] for m in models]
-                rmse_scores = [perf[m]['rmse'] for m in models]
-                
-                df_perf = pd.DataFrame({
-                    'Model': models,
-                    'MSE': mse_scores,
-                    'RMSE': rmse_scores
-                }).sort_values('MSE')
-                
-                st.dataframe(df_perf, use_container_width=True)
-                
-                # Best model highlight
-                best_model = df_perf.iloc[0]['Model']
-                best_mse = df_perf.iloc[0]['MSE']
-                st.success(f"🏆 Best Model: **{best_model}** (MSE: {best_mse:.4f})")
-                
-                # Performance chart
-                fig = px.bar(df_perf, x='Model', y='MSE', title='Live Model Performance (Lower is Better)')
-                st.plotly_chart(fig, use_container_width=True)
+            perf_data = self.dashboard_summary['model_performance']
+
+            metrics = {}
+            generated_at = None
+            declared_best_model = None
+
+            if isinstance(perf_data, dict):
+                generated_at = perf_data.get('generated_at')
+                declared_best_model = perf_data.get('best_model')
+                if isinstance(perf_data.get('metrics'), dict):
+                    metrics = perf_data['metrics']
+                else:
+                    metrics = {k: v for k, v in perf_data.items() if isinstance(v, dict)}
+
+            if metrics:
+                records = []
+                for model_name, values in metrics.items():
+                    if not isinstance(values, dict):
+                        continue
+
+                    mse_value = values.get('mse')
+                    rmse_value = values.get('rmse')
+
+                    try:
+                        mse_value = float(mse_value)
+                    except (TypeError, ValueError):
+                        continue
+
+                    if np.isnan(mse_value):
+                        continue
+
+                    if rmse_value is not None:
+                        try:
+                            rmse_value = float(rmse_value)
+                        except (TypeError, ValueError):
+                            rmse_value = None
+
+                    if rmse_value is None:
+                        rmse_value = float(np.sqrt(mse_value))
+
+                    records.append({
+                        'Model': model_name,
+                        'MSE': mse_value,
+                        'RMSE': rmse_value
+                    })
+
+                if records:
+                    df_perf = pd.DataFrame(records).sort_values('MSE')
+                    st.dataframe(df_perf, use_container_width=True)
+
+                    # Determine best model from stored metrics
+                    best_row = df_perf.iloc[0]
+                    highlight_model = declared_best_model if declared_best_model in df_perf['Model'].values else best_row['Model']
+                    highlight_mse = df_perf[df_perf['Model'] == highlight_model]['MSE'].iloc[0]
+
+                    st.success(f"🏆 Best Model: **{highlight_model}** (MSE: {highlight_mse:.4f})")
+
+                    # Performance chart using real metrics
+                    fig = px.bar(df_perf, x='Model', y='MSE', title='Model Performance (Lower is Better)')
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    if generated_at:
+                        st.caption(f"Metrics generated at: {generated_at}")
+                else:
+                    st.warning("No model performance metrics available")
             else:
                 st.warning("No model performance data in API response")
         else:
