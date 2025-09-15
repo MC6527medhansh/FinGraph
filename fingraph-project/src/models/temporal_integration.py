@@ -6,6 +6,8 @@ This integrates the temporal fix with your existing FinGraph components
 
 import sys
 import os
+from pathlib import Path
+
 sys.path.append(os.path.join(os.path.dirname(__file__), '../..'))
 
 # Import your existing FinGraph components
@@ -22,7 +24,12 @@ import torch
 import logging
 import json
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any
+
+PREDICTIONS_DIR = Path(__file__).resolve().parents[2] / 'data' / 'temporal_integration'
+DEFAULT_PREDICTIONS_FILE = PREDICTIONS_DIR / 'predictions.csv'
+DEFAULT_SUMMARY_FILE = PREDICTIONS_DIR / 'dashboard_summary.json'
+DEFAULT_METADATA_FILE = PREDICTIONS_DIR / 'metadata.json'
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +66,7 @@ class FinGraphTemporalIntegrator:
         self.loaded_data = None
         self.enhanced_graph = None
         self.temporal_results = None
-        self.integration_results = {}
+        self.integration_results: Dict[str, Any] = {}
     
     def load_existing_fingraph_data(
         self,
@@ -275,13 +282,17 @@ class FinGraphTemporalIntegrator:
                     
                     prediction = {
                         'symbol': symbol,
-                        'risk_score': latest['risk_score'],
-                        'volatility': latest['volatility'],
-                        'high_risk_flag': latest['high_risk'],
-                        'risk_level': self._categorize_risk(latest['risk_score']),
+                        'risk_score': float(latest['risk_score']),
+                        'volatility': float(latest['volatility']),
+                        'high_risk_flag': bool(latest['high_risk']),
+                        'risk_level': self._categorize_risk(float(latest['risk_score'])),
                         'prediction_date': datetime.now().strftime('%Y-%m-%d'),
-                        'data_date': latest['date'].strftime('%Y-%m-%d')
+                        'data_date': latest['date'].strftime('%Y-%m-%d'),
+                        'last_updated': datetime.now().isoformat()
                     }
+
+                    recent_metrics = self._compute_recent_market_metrics(symbol)
+                    prediction.update(recent_metrics)
                     
                     latest_predictions.append(prediction)
             
@@ -293,12 +304,72 @@ class FinGraphTemporalIntegrator:
             
             logger.info(f"✅ Generated predictions for {len(predictions_df)} companies")
             logger.info(f"🚨 High risk companies: {(predictions_df['risk_level'] == 'High').sum()}")
-            
+
             return True
-            
+
         except Exception as e:
             logger.error(f"❌ Failed to generate predictions: {str(e)}")
             return False
+
+    def _compute_recent_market_metrics(self, symbol: str) -> Dict[str, float]:
+        """Compute supporting market metrics for stored predictions."""
+
+        if self.loaded_data is None:
+            return {
+                'momentum_5d': 0.0,
+                'momentum_20d': 0.0,
+                'rsi': 50.0,
+                'max_drawdown': 0.0
+            }
+
+        stock_df = self.loaded_data.get('stock_data')
+        if stock_df is None or stock_df.empty or 'Symbol' not in stock_df.columns or 'Close' not in stock_df.columns:
+            return {
+                'momentum_5d': 0.0,
+                'momentum_20d': 0.0,
+                'rsi': 50.0,
+                'max_drawdown': 0.0
+            }
+
+        symbol_data = stock_df[stock_df['Symbol'] == symbol].copy()
+        if symbol_data.empty:
+            return {
+                'momentum_5d': 0.0,
+                'momentum_20d': 0.0,
+                'rsi': 50.0,
+                'max_drawdown': 0.0
+            }
+
+        symbol_data = symbol_data.sort_index()
+        closes = symbol_data['Close'].astype(float)
+        returns = closes.pct_change().dropna()
+
+        momentum_5d = float(returns.tail(5).mean()) if len(returns) >= 5 else 0.0
+        momentum_20d = float(returns.tail(20).mean()) if len(returns) >= 20 else momentum_5d
+
+        cumulative = (1 + returns).cumprod()
+        running_max = cumulative.expanding().max()
+        drawdown = ((cumulative - running_max) / running_max).min() if not cumulative.empty else 0.0
+
+        rsi = self._calculate_rsi(closes)
+        rsi_value = float(rsi.iloc[-1]) if not rsi.empty else 50.0
+
+        return {
+            'momentum_5d': momentum_5d,
+            'momentum_20d': momentum_20d,
+            'rsi': rsi_value,
+            'max_drawdown': float(abs(drawdown)) if drawdown is not None else 0.0
+        }
+
+    def _calculate_rsi(self, prices) -> pd.Series:
+        """Helper to compute RSI for stored predictions."""
+
+        delta = prices.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi.fillna(method='bfill').fillna(50)
     
     def _categorize_risk(self, risk_score):
         """Categorize risk score into levels"""
@@ -408,41 +479,54 @@ class FinGraphTemporalIntegrator:
         logger.info("💾 Saving integration results...")
         
         try:
-            # Create output directory
-            output_dir = 'data/temporal_integration'
-            os.makedirs(output_dir, exist_ok=True)
-            
+            PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
+
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            
+
             # Save predictions
             if 'current_predictions' in self.integration_results:
-                predictions_file = f'{output_dir}/risk_predictions_{timestamp}.csv'
-                self.integration_results['current_predictions'].to_csv(predictions_file, index=False)
-                logger.info(f"📊 Saved predictions: {predictions_file}")
-            
+                predictions_df = self.integration_results['current_predictions']
+                timestamped_file = PREDICTIONS_DIR / f'risk_predictions_{timestamp}.csv'
+                predictions_df.to_csv(timestamped_file, index=False)
+                predictions_df.to_csv(DEFAULT_PREDICTIONS_FILE, index=False)
+                logger.info(f"📊 Saved predictions: {timestamped_file.name} and {DEFAULT_PREDICTIONS_FILE.name}")
+
             # Save dashboard summary
             if 'dashboard_summary' in self.integration_results:
-                summary_file = f'{output_dir}/dashboard_summary_{timestamp}.json'
-                with open(summary_file, 'w') as f:
-                    json.dump(self.integration_results['dashboard_summary'], f, indent=2, default=str)
-                logger.info(f"📋 Saved dashboard summary: {summary_file}")
-            
+                summary = self.integration_results['dashboard_summary']
+                timestamped_summary = PREDICTIONS_DIR / f'dashboard_summary_{timestamp}.json'
+                with timestamped_summary.open('w', encoding='utf-8') as f:
+                    json.dump(summary, f, indent=2, default=str)
+                with DEFAULT_SUMMARY_FILE.open('w', encoding='utf-8') as f:
+                    json.dump(summary, f, indent=2, default=str)
+                logger.info(f"📋 Saved dashboard summaries to {timestamped_summary.name} and {DEFAULT_SUMMARY_FILE.name}")
+
+                metadata = {
+                    'generated_at': datetime.now().isoformat(),
+                    'prediction_file': DEFAULT_PREDICTIONS_FILE.name,
+                    'summary_file': DEFAULT_SUMMARY_FILE.name,
+                    'companies': summary.get('risk_overview', {}).get('total_companies')
+                }
+                with DEFAULT_METADATA_FILE.open('w', encoding='utf-8') as f:
+                    json.dump(metadata, f, indent=2)
+                logger.info(f"🗂️ Updated metadata: {DEFAULT_METADATA_FILE.name}")
+
             # Save analysis report
             if 'analysis_report' in self.integration_results:
-                report_file = f'{output_dir}/graph_analysis_report_{timestamp}.txt'
-                with open(report_file, 'w') as f:
+                report_file = PREDICTIONS_DIR / f'graph_analysis_report_{timestamp}.txt'
+                with report_file.open('w', encoding='utf-8') as f:
                     f.write(self.integration_results['analysis_report'])
-                logger.info(f"📄 Saved analysis report: {report_file}")
-            
+                logger.info(f"📄 Saved analysis report: {report_file.name}")
+
             # Save enhanced graph
             if self.enhanced_graph is not None:
-                graph_file = f'{output_dir}/enhanced_graph_{timestamp}.pt'
+                graph_file = PREDICTIONS_DIR / f'enhanced_graph_{timestamp}.pt'
                 torch.save(self.enhanced_graph, graph_file)
-                logger.info(f"🌐 Saved enhanced graph: {graph_file}")
-            
-            logger.info(f"✅ All results saved to {output_dir}/")
+                logger.info(f"🌐 Saved enhanced graph: {graph_file.name}")
+
+            logger.info(f"✅ All results saved to {PREDICTIONS_DIR}/")
             return True
-            
+
         except Exception as e:
             logger.error(f"❌ Failed to save results: {str(e)}")
             return False
