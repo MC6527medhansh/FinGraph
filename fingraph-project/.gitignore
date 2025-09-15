@@ -21,6 +21,7 @@ data/processed/*
 # Model files (too large)
 models/*.pth
 models/*.pkl
+models/*.joblib
 
 # API keys and secrets
 .env
