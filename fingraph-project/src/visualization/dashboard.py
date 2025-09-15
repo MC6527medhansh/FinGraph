@@ -6,7 +6,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
 import json
 import os
 import requests
@@ -24,14 +23,74 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+
 class FinGraphDashboard:
-    """Robust dashboard that connects to live API"""
-    
+    """Dashboard capable of using live API data or stored temporal predictions."""
+
     def __init__(self):
         self.api_base_url = "https://fingraph-production.up.railway.app"
         self.risk_data = None
         self.dashboard_summary = None
-    
+        self.local_predictions_path = os.path.join(project_root, 'data', 'temporal_integration', 'predictions.csv')
+        self.local_summary_path = os.path.join(project_root, 'data', 'temporal_integration', 'dashboard_summary.json')
+        self.data_source = None
+
+    def _categorize_risk(self, risk_score):
+        if risk_score >= 0.7:
+            return 'High'
+        elif risk_score >= 0.4:
+            return 'Medium'
+        return 'Low'
+
+    def _prepare_predictions_dataframe(self, df):
+        prepared = df.copy()
+        prepared['symbol'] = prepared['symbol'].astype(str)
+        prepared['risk_score'] = pd.to_numeric(prepared['risk_score'], errors='coerce')
+        prepared = prepared[prepared['risk_score'].notnull()]
+
+        if 'risk_level' not in prepared.columns:
+            prepared['risk_level'] = prepared['risk_score'].apply(self._categorize_risk)
+
+        if 'volatility' not in prepared.columns:
+            prepared['volatility'] = np.nan
+        else:
+            prepared['volatility'] = pd.to_numeric(prepared['volatility'], errors='coerce')
+
+        for column in ['momentum_5d', 'momentum_20d', 'rsi', 'max_drawdown']:
+            if column not in prepared.columns:
+                prepared[column] = np.nan
+            else:
+                prepared[column] = pd.to_numeric(prepared[column], errors='coerce')
+
+        if 'last_updated' not in prepared.columns:
+            if 'prediction_date' in prepared.columns:
+                prepared['last_updated'] = prepared['prediction_date']
+            else:
+                prepared['last_updated'] = datetime.now().isoformat()
+
+        return prepared
+
+    def _build_summary_from_df(self, df):
+        if 'last_updated' in df.columns:
+            last_updated_series = pd.to_datetime(df['last_updated'], errors='coerce').dropna()
+            timestamp = last_updated_series.max().isoformat() if not last_updated_series.empty else datetime.now().isoformat()
+        else:
+            timestamp = datetime.now().isoformat()
+
+        summary = {
+            'timestamp': timestamp,
+            'risk_overview': {
+                'total_companies': len(df),
+                'high_risk_count': int((df['risk_level'] == 'High').sum()),
+                'medium_risk_count': int((df['risk_level'] == 'Medium').sum()),
+                'low_risk_count': int((df['risk_level'] == 'Low').sum()),
+                'average_risk_score': float(df['risk_score'].mean()) if not df.empty else 0.0
+            },
+            'model_performance': {}
+        }
+
+        return summary
+
     def test_api_connection(self):
         """Test API connectivity and return status"""
         try:
@@ -42,138 +101,174 @@ class FinGraphDashboard:
                 return False, f"API returned status {response.status_code}"
         except requests.exceptions.RequestException as e:
             return False, f"Connection failed: {str(e)}"
-    
+
     def load_live_data(self):
-        """Load data directly from live API - no fallbacks"""
+        """Load data directly from live API"""
         try:
-            # Test connection first
             connected, health_data = self.test_api_connection()
             if not connected:
                 return None, f"API connection failed: {health_data}"
-            
+
             st.success(f"✅ Connected to API - Last update: {health_data.get('last_update', 'Unknown')}")
-            
-            # Get risk data
+
             risk_response = requests.get(f"{self.api_base_url}/risk", timeout=15)
             if risk_response.status_code != 200:
                 return None, f"Risk endpoint failed: {risk_response.status_code}"
-            
+
             risk_data = risk_response.json()
             risk_df = pd.DataFrame(risk_data)
-            
-            # Get portfolio data  
+
             portfolio_response = requests.get(f"{self.api_base_url}/portfolio", timeout=15)
             if portfolio_response.status_code != 200:
                 return None, f"Portfolio endpoint failed: {portfolio_response.status_code}"
-            
+
             portfolio_data = portfolio_response.json()
-            
-            # Format dashboard summary from API data
+
             dashboard_summary = {
                 'timestamp': portfolio_data.get('timestamp'),
                 'risk_overview': {
                     'total_companies': portfolio_data.get('companies_analyzed'),
                     'high_risk_count': portfolio_data.get('risk_distribution', {}).get('High', 0),
-                    'medium_risk_count': portfolio_data.get('risk_distribution', {}).get('Medium', 0), 
+                    'medium_risk_count': portfolio_data.get('risk_distribution', {}).get('Medium', 0),
                     'low_risk_count': portfolio_data.get('risk_distribution', {}).get('Low', 0),
                     'average_risk_score': portfolio_data.get('average_risk_score')
                 },
                 'model_performance': portfolio_data.get('model_performance', {})
             }
-            
+
             st.info(f"📊 Loaded live data: {len(risk_df)} companies, updated {dashboard_summary['timestamp'][:19]}")
-            
+
             return {'summary': dashboard_summary, 'predictions': risk_df}, None
-            
+
         except requests.exceptions.RequestException as e:
             return None, f"Network error: {str(e)}"
         except Exception as e:
             return None, f"Data processing error: {str(e)}"
-    
+
+    def load_local_results(self):
+        """Load locally stored temporal integration results"""
+        if not os.path.exists(self.local_predictions_path):
+            return None, "Predictions file not found"
+
+        try:
+            predictions_df = pd.read_csv(self.local_predictions_path)
+            if predictions_df.empty:
+                return None, "Predictions file is empty"
+
+            prepared_df = self._prepare_predictions_dataframe(predictions_df)
+            if prepared_df.empty:
+                return None, "Predictions data did not contain valid rows"
+
+            summary = None
+            if os.path.exists(self.local_summary_path):
+                try:
+                    with open(self.local_summary_path, 'r', encoding='utf-8') as f:
+                        summary_data = json.load(f)
+                    if isinstance(summary_data, dict):
+                        summary = summary_data
+                except (json.JSONDecodeError, OSError):
+                    summary = None
+
+            if summary is None:
+                summary = self._build_summary_from_df(prepared_df)
+
+            return {'summary': summary, 'predictions': prepared_df}, None
+        except Exception as e:
+            return None, f"Failed to load stored predictions: {str(e)}"
+
     def render_header(self):
-        """Header with live API status"""
+        """Header with data source status"""
         st.markdown("# 📊 FinGraph Dashboard")
-        st.markdown("### Financial Risk Assessment - Live Data")
-        
-        # Show API connection status
-        connected, status_data = self.test_api_connection()
-        if connected:
+        source_titles = {
+            "Live API": "Live Data",
+            "Stored Results": "Stored Predictions"
+        }
+        st.markdown(f"### Financial Risk Assessment - {source_titles.get(self.data_source, 'Data')}")
+
+        if self.data_source == "Live API":
+            connected, status_data = self.test_api_connection()
+            if connected:
+                col1, col2, col3, col4 = st.columns(4)
+
+                with col1:
+                    st.metric("API Status", "🟢 Live")
+                with col2:
+                    st.metric("Companies", status_data.get('companies_count', 'N/A'))
+                with col3:
+                    st.metric("Data Source", "Real-time API")
+                with col4:
+                    last_update = status_data.get('last_update', '')[:19] if status_data.get('last_update') else 'Unknown'
+                    st.metric("Last Update", last_update)
+            else:
+                st.error(f"🔴 API Connection Failed: {status_data}")
+        elif self.data_source == "Stored Results":
+            overview = self.dashboard_summary.get('risk_overview', {}) if self.dashboard_summary else {}
+            timestamp = self.dashboard_summary.get('timestamp', 'Unknown') if self.dashboard_summary else 'Unknown'
+
             col1, col2, col3, col4 = st.columns(4)
-            
             with col1:
-                st.metric("API Status", "🟢 Live")
+                st.metric("Data Source", "Stored Predictions")
             with col2:
-                st.metric("Companies", status_data.get('companies_count', 'N/A'))
+                st.metric("Companies", overview.get('total_companies', 'N/A'))
             with col3:
-                st.metric("Data Source", "Real-time API")
+                st.metric("High Risk", overview.get('high_risk_count', 0))
             with col4:
-                last_update = status_data.get('last_update', '')[:10] if status_data.get('last_update') else 'Unknown'
-                st.metric("Last Update", last_update)
+                st.metric("Last Update", timestamp[:19] if timestamp else 'Unknown')
+
+            st.caption(f"Loaded from {self.local_predictions_path}")
         else:
-            st.error(f"🔴 API Connection Failed: {status_data}")
-        
+            st.info("Select a data source from the sidebar to load results.")
+
         st.markdown("---")
-    
+
     def render_risk_table(self):
-        """Risk rankings from live API data"""
-        st.markdown("## 🎯 Live Company Risk Rankings")
-        
+        """Render risk rankings for the loaded data"""
+        source_label = "Live" if self.data_source == "Live API" else "Stored" if self.data_source == "Stored Results" else "Live"
+        st.markdown(f"## 🎯 {source_label} Company Risk Rankings")
+
         if self.risk_data is not None and not self.risk_data.empty:
-            # Sort by risk score (highest first)
             df_display = self.risk_data.sort_values('risk_score', ascending=False).copy()
-            
-            # Add risk level emoji
+
             risk_emoji = {'High': '🚨', 'Medium': '⚠️', 'Low': '✅'}
             df_display['Risk Level'] = df_display['risk_level'].map(risk_emoji) + ' ' + df_display['risk_level']
-            
-            # Display table with live data
+
             st.dataframe(
                 df_display[['symbol', 'Risk Level', 'risk_score', 'volatility']].rename(columns={
                     'symbol': 'Company',
-                    'risk_score': 'Risk Score', 
+                    'risk_score': 'Risk Score',
                     'volatility': 'Volatility'
                 }),
                 use_container_width=True
             )
-            
-            # Risk distribution chart from live data
+
             risk_counts = self.risk_data['risk_level'].value_counts()
             fig = px.pie(
                 values=risk_counts.values,
                 names=risk_counts.index,
-                title="Live Risk Distribution",
+                title=f"{source_label} Risk Distribution",
                 color_discrete_map={'High': '#ff4444', 'Medium': '#ffaa44', 'Low': '#44ff44'}
             )
             st.plotly_chart(fig, use_container_width=True)
-            
-            # Show data timestamp
+
             if self.dashboard_summary and 'timestamp' in self.dashboard_summary:
                 st.caption(f"Data timestamp: {self.dashboard_summary['timestamp']}")
         else:
-            st.error("❌ No live risk data available")
-    
+            st.error(f"❌ No {source_label.lower()} risk data available")
+
     def render_model_performance(self):
-        """Model performance from live API"""
-        st.markdown("## 🤖 Live Model Performance")
+        """Display model performance metrics"""
+        source_label = "Live" if self.data_source == "Live API" else "Stored"
+        st.markdown(f"## 🤖 {source_label} Model Performance")
 
         if self.dashboard_summary and 'model_performance' in self.dashboard_summary:
-            perf_data = self.dashboard_summary['model_performance']
+            perf = self.dashboard_summary['model_performance']
 
-            metrics = {}
-            generated_at = None
-            declared_best_model = None
+            if perf:
+                models = []
+                mse_scores = []
+                rmse_scores = []
 
-            if isinstance(perf_data, dict):
-                generated_at = perf_data.get('generated_at')
-                declared_best_model = perf_data.get('best_model')
-                if isinstance(perf_data.get('metrics'), dict):
-                    metrics = perf_data['metrics']
-                else:
-                    metrics = {k: v for k, v in perf_data.items() if isinstance(v, dict)}
-
-            if metrics:
-                records = []
-                for model_name, values in metrics.items():
+                for model_name, values in perf.items():
                     if not isinstance(values, dict):
                         continue
 
@@ -185,9 +280,6 @@ class FinGraphDashboard:
                     except (TypeError, ValueError):
                         continue
 
-                    if np.isnan(mse_value):
-                        continue
-
                     if rmse_value is not None:
                         try:
                             rmse_value = float(rmse_value)
@@ -197,106 +289,138 @@ class FinGraphDashboard:
                     if rmse_value is None:
                         rmse_value = float(np.sqrt(mse_value))
 
-                    records.append({
-                        'Model': model_name,
-                        'MSE': mse_value,
-                        'RMSE': rmse_value
-                    })
+                    if np.isnan(mse_value):
+                        continue
 
-                if records:
-                    df_perf = pd.DataFrame(records).sort_values('MSE')
+                    models.append(model_name)
+                    mse_scores.append(mse_value)
+                    rmse_scores.append(rmse_value)
+
+                if models:
+                    df_perf = pd.DataFrame({
+                        'Model': models,
+                        'MSE': mse_scores,
+                        'RMSE': rmse_scores
+                    }).sort_values('MSE')
+
                     st.dataframe(df_perf, use_container_width=True)
 
-                    # Determine best model from stored metrics
-                    best_row = df_perf.iloc[0]
-                    highlight_model = declared_best_model if declared_best_model in df_perf['Model'].values else best_row['Model']
-                    highlight_mse = df_perf[df_perf['Model'] == highlight_model]['MSE'].iloc[0]
+                    best_model = df_perf.iloc[0]['Model']
+                    best_mse = df_perf.iloc[0]['MSE']
+                    st.success(f"🏆 Best Model: **{best_model}** (MSE: {best_mse:.4f})")
 
-                    st.success(f"🏆 Best Model: **{highlight_model}** (MSE: {highlight_mse:.4f})")
-
-                    # Performance chart using real metrics
                     fig = px.bar(df_perf, x='Model', y='MSE', title='Model Performance (Lower is Better)')
                     st.plotly_chart(fig, use_container_width=True)
-
-                    if generated_at:
-                        st.caption(f"Metrics generated at: {generated_at}")
                 else:
                     st.warning("No model performance metrics available")
             else:
-                st.warning("No model performance data in API response")
+                st.info("Model performance data is not available for this data source")
         else:
-            st.error("❌ No live model performance data available")
-    
+            st.error("❌ No model performance data available")
+
     def render_alerts(self):
-        """Risk alerts from live data"""
-        st.markdown("## 🚨 Live Risk Alerts")
-        
+        """Risk alerts for the loaded dataset"""
+        source_label = "Live" if self.data_source == "Live API" else "Stored"
+        st.markdown(f"## 🚨 {source_label} Risk Alerts")
+
         if self.risk_data is not None and not self.risk_data.empty:
-            # Get high risk companies
             high_risk = self.risk_data[self.risk_data['risk_level'] == 'High']
-            
+
             if len(high_risk) > 0:
                 st.error(f"🚨 {len(high_risk)} companies at HIGH RISK:")
                 for _, row in high_risk.iterrows():
                     st.markdown(f"- **{row['symbol']}**: Risk Score {row['risk_score']:.3f}")
             else:
                 st.success("✅ No high risk companies detected")
-            
-            # Dynamic risk threshold
+
             threshold = st.slider("Risk Alert Threshold", 0.0, 1.0, 0.7, 0.05)
             alerts = self.risk_data[self.risk_data['risk_score'] >= threshold]
-            
+
             if len(alerts) > 0:
                 st.warning(f"⚠️ {len(alerts)} companies above {threshold:.2f} threshold")
                 for _, row in alerts.iterrows():
                     st.text(f"{row['symbol']}: {row['risk_score']:.3f}")
         else:
-            st.error("❌ No live risk data for alerts")
-    
+            st.error(f"❌ No {source_label.lower()} risk data for alerts")
+
     def run(self):
-        """Main dashboard execution - loads live data only"""
-        
-        # Force fresh data load on every run (no caching of static data)
-        with st.spinner("🔄 Loading live data from API..."):
-            results, error = self.load_live_data()
-        
-        if error:
-            st.error(f"❌ Failed to load live data: {error}")
+        """Main dashboard execution supporting multiple data sources."""
+        st.sidebar.header("Data Source")
+        mode = st.sidebar.radio(
+            "Preferred source",
+            ["Auto", "Stored Results", "Live API"],
+            index=0
+        )
+        st.sidebar.caption("Auto loads stored predictions when available and falls back to the live API if needed.")
+
+        stored_error = None
+        api_error = None
+        results = None
+        actual_source = None
+
+        with st.spinner("🔄 Loading risk data..."):
+            if mode == "Stored Results":
+                results, stored_error = self.load_local_results()
+                actual_source = "Stored Results"
+            elif mode == "Live API":
+                results, api_error = self.load_live_data()
+                actual_source = "Live API"
+            else:
+                results, stored_error = self.load_local_results()
+                if results:
+                    actual_source = "Stored Results"
+                else:
+                    results, api_error = self.load_live_data()
+                    actual_source = "Live API" if results else None
+
+        if results is None:
+            if mode == "Auto" and stored_error and api_error:
+                st.error("❌ Failed to load both stored predictions and live API data.")
+                st.markdown(f"- Stored predictions error: {stored_error}")
+                st.markdown(f"- Live API error: {api_error}")
+            else:
+                message = stored_error or api_error or "Unknown error"
+                st.error(f"❌ Failed to load data: {message}")
+
             st.markdown("""
             ### 🔧 Troubleshooting:
+            - Ensure temporal integration predictions are saved locally
             - Check if API is running: https://fingraph-production.up.railway.app/health
             - Verify network connectivity
             - Try refreshing the page
             """)
             return
-        
-        # Store live data
-        if results:
-            self.dashboard_summary = results['summary']
-            self.risk_data = results['predictions']
-        
-        # Render dashboard with live data
+
+        self.dashboard_summary = results['summary']
+        self.risk_data = results['predictions']
+        self.data_source = actual_source
+
+        if mode == "Auto" and actual_source == "Live API" and stored_error:
+            st.warning(f"Stored predictions unavailable ({stored_error}). Loaded live API data instead.")
+
         self.render_header()
-        
+
         tab1, tab2, tab3 = st.tabs(["🎯 Risk Overview", "🤖 Model Performance", "🚨 Alerts"])
-        
+
         with tab1:
             self.render_risk_table()
-        
+
         with tab2:
             self.render_model_performance()
-        
+
         with tab3:
             self.render_alerts()
-        
-        # Refresh button for live updates
-        if st.button("🔄 Refresh Live Data"):
+
+        refresh_label = "🔄 Refresh Live Data" if self.data_source == "Live API" else "🔄 Reload Stored Data"
+        if st.button(refresh_label):
             st.rerun()
+
 
 def main():
     """Run the live dashboard - API data only"""
     dashboard = FinGraphDashboard()
     dashboard.run()
+
 
 if __name__ == "__main__":
     main()
