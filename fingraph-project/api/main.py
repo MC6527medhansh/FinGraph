@@ -5,11 +5,10 @@ This version generates fresh risk predictions on each request
 
 import os
 import sys
-import json
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -38,6 +37,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+PREDICTIONS_DIR = os.path.join(project_root, "data", "temporal_integration")
+DEFAULT_PREDICTIONS_FILE = os.path.join(PREDICTIONS_DIR, "predictions.csv")
+SUPPORTED_DATA_SOURCES = {"live", "stored", "auto"}
 
 # Response models (keep existing)
 class RiskScore(BaseModel):
@@ -235,9 +238,164 @@ class RealTimeRiskCalculator:
 # Global calculator instance
 risk_calculator = RealTimeRiskCalculator()
 
+def stored_predictions_available(path: str = DEFAULT_PREDICTIONS_FILE) -> bool:
+    """Return True when a persisted predictions snapshot exists."""
+
+    return os.path.exists(path) and os.path.getsize(path) > 0
+
+
+def categorize_risk_level(risk_score: float) -> str:
+    """Categorize a numeric risk score into a discrete level."""
+
+    if risk_score >= 0.7:
+        return "High"
+    if risk_score >= 0.4:
+        return "Medium"
+    return "Low"
+
+
+def standardize_prediction_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure prediction data contains the columns needed by the API."""
+
+    if df is None:
+        return pd.DataFrame()
+
+    standardized = df.copy()
+
+    if 'symbol' in standardized.columns:
+        standardized['symbol'] = standardized['symbol'].astype(str).str.upper()
+    else:
+        standardized['symbol'] = ''
+
+    if 'risk_score' not in standardized.columns:
+        logger.error("Predictions data missing 'risk_score' column")
+        standardized['risk_score'] = np.nan
+
+    standardized['risk_score'] = pd.to_numeric(standardized['risk_score'], errors='coerce')
+    standardized = standardized[standardized['risk_score'].notnull()]
+
+    if 'risk_level' not in standardized.columns:
+        standardized['risk_level'] = standardized['risk_score'].apply(categorize_risk_level)
+
+    if 'volatility' in standardized.columns:
+        standardized['volatility'] = pd.to_numeric(standardized['volatility'], errors='coerce')
+    else:
+        standardized['volatility'] = np.nan
+
+    if 'last_updated' in standardized.columns:
+        standardized['last_updated'] = standardized['last_updated'].astype(str)
+    elif 'prediction_date' in standardized.columns:
+        standardized['last_updated'] = standardized['prediction_date'].astype(str)
+    else:
+        standardized['last_updated'] = datetime.now().isoformat()
+
+    return standardized
+
+
+def load_stored_predictions(predictions_path: str = DEFAULT_PREDICTIONS_FILE) -> Optional[pd.DataFrame]:
+    """Load predictions persisted by the temporal integrator."""
+
+    if not os.path.exists(predictions_path):
+        logger.info("Stored predictions file not found: %s", predictions_path)
+        return None
+
+    try:
+        predictions_df = pd.read_csv(predictions_path)
+        if predictions_df.empty:
+            logger.warning("Stored predictions file is empty: %s", predictions_path)
+            return None
+
+        standardized_df = standardize_prediction_dataframe(predictions_df)
+        if standardized_df.empty:
+            logger.warning("Stored predictions did not contain usable rows")
+            return None
+
+        logger.info("Loaded %d stored predictions", len(standardized_df))
+        return standardized_df
+
+    except Exception as exc:
+        logger.error("Failed to load stored predictions: %s", exc)
+        return None
+
+
+def get_risk_dataframe(source: str = "live", refresh: bool = False) -> Tuple[Optional[pd.DataFrame], str]:
+    """Return a DataFrame of risk data for the requested source."""
+
+    requested_source = (source or "live").lower()
+    if requested_source not in SUPPORTED_DATA_SOURCES:
+        logger.warning("Unknown risk data source '%s', defaulting to live", requested_source)
+        requested_source = "live"
+
+    if requested_source in {"stored", "auto"}:
+        stored_df = load_stored_predictions()
+        if stored_df is not None:
+            return stored_df, "stored"
+        if requested_source == "stored":
+            return None, "stored"
+        logger.info("Stored predictions unavailable; falling back to live heuristics")
+
+    if refresh:
+        risk_calculator.last_update = None
+
+    live_records = risk_calculator.get_real_time_risk_scores()
+    if not live_records:
+        return None, "live"
+
+    live_df = pd.DataFrame(live_records)
+    live_df = standardize_prediction_dataframe(live_df)
+    return live_df, "live"
+
+
+def get_last_update_from_df(df: pd.DataFrame) -> Optional[str]:
+    """Extract the latest timestamp from a predictions DataFrame."""
+
+    if df is None or df.empty:
+        return None
+
+    if 'last_updated' in df.columns:
+        series = df['last_updated'].dropna()
+        if not series.empty:
+            try:
+                return pd.to_datetime(series).max().isoformat()
+            except Exception:
+                return str(series.iloc[-1])
+
+    if 'prediction_date' in df.columns:
+        series = df['prediction_date'].dropna()
+        if not series.empty:
+            try:
+                return pd.to_datetime(series).max().isoformat()
+            except Exception:
+                return str(series.iloc[-1])
+
+    return None
+
+
+def row_to_risk_score(row: pd.Series) -> RiskScore:
+    """Convert a DataFrame row into a RiskScore response model."""
+
+    volatility = row.get('volatility', 0.0)
+    if pd.isna(volatility):
+        volatility = 0.0
+
+    return RiskScore(
+        symbol=str(row['symbol']),
+        risk_score=float(row['risk_score']),
+        risk_level=str(row['risk_level']),
+        volatility=float(volatility)
+    )
+
 @app.get("/", response_model=Dict)
 async def root():
     """FinGraph API - Real-Time Financial Risk Assessment"""
+    stored_available = stored_predictions_available()
+    stored_last_update = None
+    if stored_available:
+        try:
+            stored_last_update = datetime.fromtimestamp(os.path.getmtime(DEFAULT_PREDICTIONS_FILE)).isoformat()
+        except OSError:
+            stored_last_update = None
+
     return {
         "message": "FinGraph API - Real-Time Financial Risk Assessment",
         "version": "2.0.0",
@@ -246,7 +404,8 @@ async def root():
             "real_time_data": True,
             "cache_duration": "5 minutes",
             "companies_tracked": len(risk_calculator.symbols),
-            "metrics": ["risk_score", "volatility", "momentum", "rsi", "drawdown"]
+            "metrics": ["risk_score", "volatility", "momentum", "rsi", "drawdown"],
+            "stored_predictions_available": stored_available
         },
         "endpoints": {
             "health": "/health",
@@ -255,19 +414,31 @@ async def root():
             "portfolio": "/portfolio",
             "alerts": "/alerts"
         },
+        "data_sources": {
+            "default": "live",
+            "supported": sorted(SUPPORTED_DATA_SOURCES),
+            "stored_last_update": stored_last_update
+        },
         "last_update": risk_calculator.last_update.isoformat() if risk_calculator.last_update else None
     }
 
 @app.get("/health", response_model=HealthStatus)
-async def health():
-    """Health check with real-time status"""
-    risk_data = risk_calculator.get_real_time_risk_scores()
-    
+async def health(source: str = Query("live", description="Data source: live, stored, or auto")):
+    """Health check supporting live or stored prediction sources."""
+
+    df, data_source = get_risk_dataframe(source)
+    if df is None:
+        if data_source == "stored":
+            raise HTTPException(status_code=404, detail="Stored predictions not available")
+        raise HTTPException(status_code=503, detail="Unable to fetch market data")
+
+    last_update = get_last_update_from_df(df) or datetime.now().isoformat()
+
     return HealthStatus(
         status="healthy",
-        data_available=len(risk_data) > 0,
-        last_update=datetime.now().isoformat(),
-        companies_count=len(risk_data)
+        data_available=not df.empty,
+        last_update=last_update,
+        companies_count=len(df)
     )
 
 @app.get("/risk", response_model=List[RiskScore])
@@ -275,144 +446,197 @@ async def get_all_risks(
     risk_level: Optional[str] = Query(None, description="Filter by risk level: Low, Medium, High"),
     sort_by: str = Query("risk_score", description="Sort by risk_score or symbol"),
     limit: int = Query(10, ge=1, le=100),
-    refresh: bool = Query(False, description="Force refresh data")
+    refresh: bool = Query(False, description="Force refresh data"),
+    source: str = Query("live", description="Data source: live, stored, or auto")
 ):
-    """Get real-time risk scores for all companies"""
-    
-    # Force refresh if requested
-    if refresh:
-        risk_calculator.last_update = None
-    
-    # Get real-time data
-    risk_data = risk_calculator.get_real_time_risk_scores()
-    
-    if not risk_data:
+    """Get risk scores from either live calculations or stored predictions."""
+
+    df, data_source = get_risk_dataframe(source, refresh)
+
+    if df is None:
+        if data_source == "stored":
+            raise HTTPException(status_code=404, detail="Stored predictions not available")
         raise HTTPException(status_code=503, detail="Unable to fetch market data")
-    
-    # Convert to DataFrame for easier filtering
-    df = pd.DataFrame(risk_data)
-    
+
     # Filter by risk level if specified
     if risk_level:
         df = df[df['risk_level'].str.lower() == risk_level.lower()]
-    
+
+    if sort_by not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Invalid sort column: {sort_by}")
+
     # Sort
     ascending = sort_by != "risk_score"
     df = df.sort_values(sort_by, ascending=ascending)
-    
+
     # Limit
     df = df.head(limit)
-    
+
     # Convert to response format
-    return [
-        RiskScore(
-            symbol=row['symbol'],
-            risk_score=row['risk_score'],
-            risk_level=row['risk_level'],
-            volatility=row['volatility']
-        )
-        for _, row in df.iterrows()
-    ]
+    return [row_to_risk_score(row) for _, row in df.iterrows()]
 
 @app.get("/risk/{symbol}", response_model=RiskScore)
-async def get_company_risk(symbol: str):
-    """Get real-time risk for specific company"""
+async def get_company_risk(
+    symbol: str,
+    source: str = Query("live", description="Data source: live, stored, or auto")
+):
+    """Get risk for a specific company from live or stored data."""
+
+    normalized_source = (source or "live").lower()
+    if normalized_source not in SUPPORTED_DATA_SOURCES:
+        normalized_source = "live"
+
     symbol = symbol.upper()
-    
-    # Get real-time data
-    risk_data = risk_calculator.get_real_time_risk_scores()
-    
-    # Find the company
-    for company in risk_data:
-        if company['symbol'] == symbol:
-            return RiskScore(
-                symbol=company['symbol'],
-                risk_score=company['risk_score'],
-                risk_level=company['risk_level'],
-                volatility=company['volatility']
-            )
-    
-    # If not in standard list, calculate on-demand
+    df, data_source = get_risk_dataframe(normalized_source)
+
+    if df is None:
+        if data_source == "stored":
+            raise HTTPException(status_code=404, detail="Stored predictions not available")
+        raise HTTPException(status_code=503, detail="Unable to fetch market data")
+
+    match = df[df['symbol'] == symbol]
+    if not match.empty:
+        return row_to_risk_score(match.iloc[0])
+
+    # Auto mode: fall back to live heuristics when stored predictions miss a company
+    if data_source == "stored" and normalized_source == "auto":
+        live_df, _ = get_risk_dataframe("live")
+        if live_df is not None:
+            match = live_df[live_df['symbol'] == symbol]
+            if not match.empty:
+                return row_to_risk_score(match.iloc[0])
+        data_source = "live"
+
+    if data_source == "stored":
+        raise HTTPException(status_code=404, detail=f"Company {symbol} not found in stored predictions")
+
+    # Live fallback: compute on-demand if not part of the cached universe
     try:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=60)
         stock_data = yf.download(symbol, start=start_date, end=end_date, progress=False)
-        
+
         if len(stock_data) > 5:
             metrics = risk_calculator.calculate_risk_from_price_data(stock_data)
             if metrics:
                 risk_score = metrics['risk_score']
-                risk_level = 'High' if risk_score >= 0.7 else 'Medium' if risk_score >= 0.4 else 'Low'
-                
+                risk_level = categorize_risk_level(risk_score)
+
                 return RiskScore(
                     symbol=symbol,
                     risk_score=risk_score,
                     risk_level=risk_level,
                     volatility=metrics['volatility']
                 )
-    except:
-        pass
-    
+    except Exception as exc:
+        logger.error("On-demand risk calculation failed for %s: %s", symbol, exc)
+
     raise HTTPException(status_code=404, detail=f"Company {symbol} not found")
 
 @app.get("/portfolio")
-async def get_portfolio_summary():
-    """Real-time portfolio overview"""
-    risk_data = risk_calculator.get_real_time_risk_scores()
-    
-    if not risk_data:
+async def get_portfolio_summary(
+    source: str = Query("live", description="Data source: live, stored, or auto")
+):
+    """Portfolio overview using live or stored predictions."""
+
+    df, data_source = get_risk_dataframe(source)
+    if df is None:
+        if data_source == "stored":
+            raise HTTPException(status_code=404, detail="Stored predictions not available")
         raise HTTPException(status_code=503, detail="Unable to fetch market data")
-    
-    df = pd.DataFrame(risk_data)
-    
+
+    timestamp = get_last_update_from_df(df) or datetime.now().isoformat()
+
+    avg_risk = float(df['risk_score'].mean()) if not df.empty else 0.0
+    if 'volatility' in df.columns and df['volatility'].notna().any():
+        avg_volatility = float(df['volatility'].dropna().mean())
+    else:
+        avg_volatility = 0.0
+
+    momentum_column = 'momentum_5d' if 'momentum_5d' in df.columns else 'risk_score'
+    if df.empty:
+        momentum_records = []
+    else:
+        top_n = min(3, len(df))
+        momentum_subset = df.nlargest(top_n, momentum_column).copy()
+        if 'momentum_5d' not in momentum_subset.columns:
+            momentum_subset['momentum_5d'] = momentum_subset[momentum_column]
+        momentum_records = momentum_subset[['symbol', 'momentum_5d']].to_dict('records')
+
+    market_summary = {
+        "most_risky": df.nlargest(1, 'risk_score').iloc[0]['symbol'] if not df.empty else 'N/A',
+        "least_risky": df.nsmallest(1, 'risk_score').iloc[0]['symbol'] if not df.empty else 'N/A',
+        "highest_volatility": (
+            df.loc[df['volatility'].idxmax()]['symbol']
+            if 'volatility' in df.columns and df['volatility'].notna().any()
+            else 'N/A'
+        ),
+        "best_momentum": (
+            df.nlargest(1, 'momentum_20d').iloc[0]['symbol']
+            if 'momentum_20d' in df.columns and not df.empty
+            else (df.nlargest(1, 'risk_score').iloc[0]['symbol'] if not df.empty else 'N/A')
+        )
+    }
+
     portfolio = {
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": timestamp,
         "companies_analyzed": len(df),
         "risk_distribution": df['risk_level'].value_counts().to_dict(),
-        "average_risk_score": float(df['risk_score'].mean()),
-        "average_volatility": float(df['volatility'].mean()),
-        "high_momentum_stocks": df.nlargest(3, 'momentum_5d')[['symbol', 'momentum_5d']].to_dict('records'),
-        "model_performance": risk_calculator.get_model_performance_data(),
-        "market_summary": {
-            "most_risky": df.nlargest(1, 'risk_score').iloc[0]['symbol'],
-            "least_risky": df.nsmallest(1, 'risk_score').iloc[0]['symbol'],
-            "highest_volatility": df.nlargest(1, 'volatility').iloc[0]['symbol'],
-            "best_momentum": df.nlargest(1, 'momentum_20d').iloc[0]['symbol'] if 'momentum_20d' in df.columns else 'N/A'
-        }
+        "average_risk_score": avg_risk,
+        "average_volatility": avg_volatility,
+        "high_momentum_stocks": momentum_records,
+        "model_performance": risk_calculator.get_model_performance_data() if data_source == 'live' else {},
+        "market_summary": market_summary,
+        "data_source": data_source
     }
-    
+
     return portfolio
 
 @app.get("/alerts")
-async def get_risk_alerts(threshold: float = Query(0.7, ge=0.0, le=1.0)):
-    """Real-time risk alerts"""
-    risk_data = risk_calculator.get_real_time_risk_scores()
-    
-    if not risk_data:
+async def get_risk_alerts(
+    threshold: float = Query(0.7, ge=0.0, le=1.0),
+    source: str = Query("live", description="Data source: live, stored, or auto")
+):
+    """Risk alerts from live or stored predictions."""
+
+    df, data_source = get_risk_dataframe(source)
+    if df is None:
+        if data_source == "stored":
+            raise HTTPException(status_code=404, detail="Stored predictions not available")
         raise HTTPException(status_code=503, detail="Unable to fetch market data")
-    
-    df = pd.DataFrame(risk_data)
+
     high_risk = df[df['risk_score'] >= threshold]
-    
+
     alerts = []
+    default_timestamp = get_last_update_from_df(df) or datetime.now().isoformat()
     for _, row in high_risk.iterrows():
+        volatility = row.get('volatility', 0.0)
+        if pd.isna(volatility):
+            volatility = 0.0
+
         alerts.append({
             "symbol": row['symbol'],
-            "risk_score": row['risk_score'],
+            "risk_score": float(row['risk_score']),
             "risk_level": row['risk_level'],
-            "volatility": row['volatility'],
-            "momentum_5d": row.get('momentum_5d', 0),
+            "volatility": float(volatility),
+            "momentum_5d": row.get('momentum_5d', float(row['risk_score'])),
             "rsi": row.get('rsi', 50),
             "message": f"{row['symbol']} risk score {row['risk_score']:.3f} exceeds threshold {threshold:.2f}",
-            "timestamp": row['last_updated']
+            "timestamp": row.get('last_updated', default_timestamp)
         })
-    
+
+    if data_source == 'live':
+        market_status = "open" if 9 <= datetime.now().hour < 16 else "closed"
+    else:
+        market_status = "offline"
+
     return {
         "threshold": threshold,
         "alert_count": len(alerts),
         "alerts": alerts,
         "generated_at": datetime.now().isoformat(),
-        "market_status": "open" if datetime.now().hour >= 9 and datetime.now().hour < 16 else "closed"
+        "market_status": market_status,
+        "data_source": data_source
     }
 
 def run_server():

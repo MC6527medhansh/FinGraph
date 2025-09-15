@@ -235,7 +235,8 @@ class FinGraphTemporalIntegrator:
         try:
             # Get latest risk scores for each company
             latest_predictions = []
-            
+            prediction_timestamp = datetime.now()
+
             for symbol in self.temporal_predictor.temporal_df['symbol'].unique():
                 company_data = self.temporal_predictor.temporal_df[
                     self.temporal_predictor.temporal_df['symbol'] == symbol
@@ -251,10 +252,11 @@ class FinGraphTemporalIntegrator:
                         'volatility': latest['volatility'],
                         'high_risk_flag': latest['high_risk'],
                         'risk_level': self._categorize_risk(latest['risk_score']),
-                        'prediction_date': datetime.now().strftime('%Y-%m-%d'),
-                        'data_date': latest['date'].strftime('%Y-%m-%d')
+                        'prediction_date': prediction_timestamp.strftime('%Y-%m-%d'),
+                        'data_date': latest['date'].strftime('%Y-%m-%d'),
+                        'last_updated': prediction_timestamp.isoformat()
                     }
-                    
+
                     latest_predictions.append(prediction)
             
             # Convert to DataFrame and sort by risk
@@ -388,9 +390,18 @@ class FinGraphTemporalIntegrator:
             
             # Save predictions
             if 'current_predictions' in self.integration_results:
+                predictions_df = self.integration_results['current_predictions']
                 predictions_file = f'{output_dir}/risk_predictions_{timestamp}.csv'
-                self.integration_results['current_predictions'].to_csv(predictions_file, index=False)
+                predictions_df.to_csv(predictions_file, index=False)
                 logger.info(f"📊 Saved predictions: {predictions_file}")
+
+                # Persist a stable snapshot for downstream consumers (e.g., API/dashboard)
+                latest_predictions = predictions_df.copy()
+                if 'last_updated' not in latest_predictions.columns:
+                    latest_predictions['last_updated'] = datetime.now().isoformat()
+                stable_predictions_file = os.path.join(output_dir, 'predictions.csv')
+                latest_predictions.to_csv(stable_predictions_file, index=False)
+                logger.info(f"🗂️ Updated latest predictions snapshot: {stable_predictions_file}")
             
             # Save dashboard summary
             if 'dashboard_summary' in self.integration_results:
