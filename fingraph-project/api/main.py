@@ -9,13 +9,16 @@ import json
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
 import yfinance as yf
 import logging
+
+from src.features.graph_data_loader import GraphDataLoader
 
 # Add project root to path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -51,16 +54,55 @@ class HealthStatus(BaseModel):
     data_available: bool
     last_update: Optional[str]
     companies_count: int
+    symbol_source: str
+    tracked_symbols: List[str] = Field(default_factory=list)
+    available_symbols: List[str] = Field(default_factory=list)
+    unavailable_symbols: Dict[str, str] = Field(default_factory=dict)
 
 class RealTimeRiskCalculator:
     """Calculate real-time risk scores from live market data"""
-    
-    def __init__(self):
-        self.symbols = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'META', 'NVDA', 'NFLX', 'CRM', 'ADBE', 
-                        'JPM', 'BAC', 'V', 'MA', 'DIS', 'ORCL', 'IBM', 'INTC', 'AMD', 'QCOM']
-        self.cache = {}
+
+    def __init__(self, data_dir: Optional[str] = None):
+        self.data_dir = self._resolve_data_dir(data_dir)
+        self.cache: List[Dict[str, Any]] = []
         self.cache_duration = 300  # 5 minutes cache
         self.last_update = None
+        self.last_errors: Dict[str, str] = {}
+        self.symbol_source = "default"
+        self.symbols = self._load_symbols_from_dataset()
+
+    def _resolve_data_dir(self, data_dir: Optional[str]) -> Path:
+        if data_dir:
+            return Path(data_dir)
+        return Path(project_root) / "data" / "raw"
+
+    def _default_symbols(self) -> List[str]:
+        return ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'META', 'NVDA', 'NFLX', 'CRM', 'ADBE',
+                'JPM', 'BAC', 'V', 'MA', 'DIS', 'ORCL', 'IBM', 'INTC', 'AMD', 'QCOM']
+
+    def _load_symbols_from_dataset(self) -> List[str]:
+        data_path = self.data_dir
+
+        try:
+            if data_path.exists():
+                loader = GraphDataLoader(data_dir=str(data_path))
+                loader.load_latest_data()
+                symbols = loader.get_company_list()
+
+                if symbols:
+                    self.symbol_source = f"dataset:{data_path}"
+                    logger.info(f"📈 Loaded {len(symbols)} symbols from dataset at {data_path}")
+                    return symbols
+                logger.warning(f"⚠️ Dataset at {data_path} did not yield any symbols")
+            else:
+                logger.warning(f"⚠️ Data directory {data_path} does not exist; using default symbols")
+        except Exception as exc:
+            logger.warning(f"⚠️ Could not load symbols from dataset ({exc}); using default symbols")
+
+        self.symbol_source = "default"
+        default_symbols = self._default_symbols()
+        logger.info(f"📋 Using default symbol list with {len(default_symbols)} entries")
+        return default_symbols
     
     def _should_refresh(self):
         """Check if data should be refreshed"""
@@ -144,10 +186,11 @@ class RealTimeRiskCalculator:
         
         logger.info("🔄 Calculating fresh risk scores from live market data...")
         
-        risk_data = []
+        risk_data: List[Dict[str, Any]] = []
+        errors: Dict[str, str] = {}
         end_date = datetime.now()
         start_date = end_date - timedelta(days=60)  # Get 60 days of data
-        
+
         for symbol in self.symbols:
             try:
                 # Download real-time data
@@ -161,7 +204,7 @@ class RealTimeRiskCalculator:
                 if len(stock_data) > 5:
                     # Calculate risk metrics
                     metrics = self.calculate_risk_from_price_data(stock_data)
-                    
+
                     if metrics:
                         # Determine risk level
                         risk_score = metrics['risk_score']
@@ -185,29 +228,24 @@ class RealTimeRiskCalculator:
                         })
                         logger.info(f"✅ {symbol}: risk={risk_score:.3f}, level={risk_level}")
                     else:
-                        logger.warning(f"⚠️ {symbol}: Could not calculate metrics")
+                        message = "Unable to calculate risk metrics from downloaded data"
+                        logger.warning(f"⚠️ {symbol}: {message}")
+                        errors[symbol] = message
                 else:
-                    logger.warning(f"⚠️ {symbol}: Insufficient data")
-                    
+                    message = "Insufficient historical data returned for analysis"
+                    logger.warning(f"⚠️ {symbol}: {message}")
+                    errors[symbol] = message
+
             except Exception as e:
-                logger.error(f"❌ {symbol}: {str(e)}")
-                # Add fallback data for this symbol
-                risk_data.append({
-                    'symbol': symbol,
-                    'risk_score': 0.5 + np.random.uniform(-0.2, 0.2),
-                    'risk_level': 'Medium',
-                    'volatility': 0.25 + np.random.uniform(-0.1, 0.1),
-                    'momentum_5d': 0.0,
-                    'momentum_20d': 0.0,
-                    'rsi': 50.0,
-                    'max_drawdown': 0.1,
-                    'last_updated': datetime.now().isoformat()
-                })
-        
+                message = f"Error retrieving market data: {e}"
+                logger.error(f"❌ {symbol}: {message}")
+                errors[symbol] = message
+
         # Update cache
         self.cache = risk_data
         self.last_update = datetime.now()
-        
+        self.last_errors = errors
+
         logger.info(f"📊 Calculated risk for {len(risk_data)} companies")
         return risk_data
     
@@ -238,6 +276,7 @@ risk_calculator = RealTimeRiskCalculator()
 @app.get("/", response_model=Dict)
 async def root():
     """FinGraph API - Real-Time Financial Risk Assessment"""
+    cached_symbols = [entry['symbol'] for entry in risk_calculator.cache] if risk_calculator.cache else []
     return {
         "message": "FinGraph API - Real-Time Financial Risk Assessment",
         "version": "2.0.0",
@@ -255,19 +294,30 @@ async def root():
             "portfolio": "/portfolio",
             "alerts": "/alerts"
         },
-        "last_update": risk_calculator.last_update.isoformat() if risk_calculator.last_update else None
+        "last_update": risk_calculator.last_update.isoformat() if risk_calculator.last_update else None,
+        "companies": {
+            "source": risk_calculator.symbol_source,
+            "tracked": list(risk_calculator.symbols),
+            "available": cached_symbols,
+            "unavailable": dict(risk_calculator.last_errors)
+        }
     }
 
 @app.get("/health", response_model=HealthStatus)
 async def health():
     """Health check with real-time status"""
     risk_data = risk_calculator.get_real_time_risk_scores()
-    
+    available_symbols = [entry['symbol'] for entry in risk_data]
+
     return HealthStatus(
         status="healthy",
-        data_available=len(risk_data) > 0,
+        data_available=len(available_symbols) > 0,
         last_update=datetime.now().isoformat(),
-        companies_count=len(risk_data)
+        companies_count=len(available_symbols),
+        symbol_source=risk_calculator.symbol_source,
+        tracked_symbols=risk_calculator.symbols,
+        available_symbols=available_symbols,
+        unavailable_symbols=dict(risk_calculator.last_errors)
     )
 
 @app.get("/risk", response_model=List[RiskScore])
