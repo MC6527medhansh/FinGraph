@@ -22,6 +22,7 @@ import torch
 import logging
 import json
 from datetime import datetime
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -29,29 +30,55 @@ class FinGraphTemporalIntegrator:
     """
     Integrates temporal risk prediction with existing FinGraph infrastructure
     """
-    
-    def __init__(self):
+
+    def __init__(
+        self,
+        ensure_fresh_data: bool = False,
+        max_data_age_hours: Optional[int] = 24,
+    ):
+        """Create a new integrator instance.
+
+        Args:
+            ensure_fresh_data: When ``True``, the loader refreshes raw data if it is
+                missing or outdated.
+            max_data_age_hours: Maximum allowed age (in hours) for raw data files
+                before triggering a refresh.
+        """
+
         # Initialize existing FinGraph components
         self.graph_loader = GraphDataLoader()
         self.graph_constructor = FinGraphConstructor()
-        
+
+        self.ensure_fresh_data = ensure_fresh_data
+        self.max_data_age_hours = max_data_age_hours
+
         # Initialize temporal predictor
         self.temporal_predictor = TemporalRiskPredictor()
-        
+
         # Storage for results
         self.loaded_data = None
         self.enhanced_graph = None
         self.temporal_results = None
         self.integration_results = {}
     
-    def load_existing_fingraph_data(self):
-        """Load data using existing FinGraph infrastructure"""
+    def load_existing_fingraph_data(
+        self,
+        refresh_if_missing: Optional[bool] = None,
+        max_age_hours: Optional[int] = None,
+    ):
+        """Load data using existing FinGraph infrastructure."""
         logger.info("📂 Loading data using existing FinGraph components...")
-        
+
         try:
+            refresh = self.ensure_fresh_data if refresh_if_missing is None else refresh_if_missing
+            max_age = self.max_data_age_hours if max_age_hours is None else max_age_hours
+
             # Use existing graph data loader
-            self.loaded_data = self.graph_loader.load_latest_data()
-            
+            self.loaded_data = self.graph_loader.load_latest_data(
+                refresh_if_missing=refresh,
+                max_age_hours=max_age,
+            )
+
             logger.info("✅ Successfully loaded FinGraph data:")
             logger.info(f"  📊 Stock data: {len(self.loaded_data['stock_data'])} records")
             logger.info(f"  🏢 Company info: {len(self.loaded_data['company_info'])} companies")
@@ -64,6 +91,7 @@ class FinGraphTemporalIntegrator:
             logger.error(f"❌ Failed to load existing FinGraph data: {str(e)}")
             logger.info("💡 Make sure you have run data collection first:")
             logger.info("  python scripts/collect_data.py")
+            logger.info("💡 Or run the pipeline with data refresh enabled: --refresh-data")
             return False
     
     def run_temporal_analysis(self):
