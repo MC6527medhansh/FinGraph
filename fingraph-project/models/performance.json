@@ -1,0 +1,13 @@
+{
+  "generated_at": "2025-09-15T23:46:00Z",
+  "metrics": {
+    "Linear Regression": {
+      "mae": 0.013755495368550986,
+      "mse": 0.00026214148117107463,
+      "r2": 0.9269843163980991,
+      "rmse": 0.016190783834363134,
+      "training_samples": 2136,
+      "validation_samples": 534
+    }
+  }
+}
