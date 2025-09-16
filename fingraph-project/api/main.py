@@ -3,6 +3,7 @@ FinGraph API Service - FIXED VERSION with Real-Time Data Generation
 This version generates fresh risk predictions on each request
 """
 
+import concurrent.futures
 import os
 import sys
 import json
@@ -87,6 +88,7 @@ class RealTimeRiskCalculator:
         self.data_dir = self._resolve_data_dir(data_dir)
         self.cache: List[Dict[str, Any]] = []
         self.cache_duration = 300  # 5 minutes cache
+        self.fetch_timeout = 30  # seconds to wait for concurrent downloads
         self.last_update: Optional[datetime] = None
         self.last_errors: Dict[str, str] = {}
         self.symbol_source = "default"
@@ -297,55 +299,92 @@ class RealTimeRiskCalculator:
         history_span = max(self.lookback_days * 3, 120)
         start_date = end_date - timedelta(days=history_span)
 
-        for symbol in self.symbols:
-            try:
-                # Download real-time data
-                stock_data = yf.download(
-                    symbol,
-                    start=start_date.strftime('%Y-%m-%d'),
-                    end=end_date.strftime('%Y-%m-%d'),
-                    progress=False
-                )
+        start_str = start_date.strftime('%Y-%m-%d')
+        end_str = end_date.strftime('%Y-%m-%d')
+        max_workers = min(8, max(1, len(self.symbols)))
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
 
-                if len(stock_data) > 5:
-                    # Calculate risk metrics
-                    metrics = self.calculate_risk_from_price_data(stock_data)
+        def fetch_symbol_data(symbol: str) -> pd.DataFrame:
+            return yf.download(
+                symbol,
+                start=start_str,
+                end=end_str,
+                progress=False,
+            )
 
-                    if metrics:
-                        # Determine risk level
-                        risk_score = metrics['risk_score']
-                        if risk_score >= 0.7:
-                            risk_level = 'High'
-                        elif risk_score >= 0.4:
-                            risk_level = 'Medium'
+        future_to_symbol = {
+            executor.submit(fetch_symbol_data, symbol): symbol for symbol in self.symbols
+        }
+        pending_futures = set(future_to_symbol.keys())
+
+        try:
+            for future in concurrent.futures.as_completed(
+                future_to_symbol, timeout=self.fetch_timeout
+            ):
+                pending_futures.discard(future)
+                symbol = future_to_symbol[future]
+                exception = future.exception()
+
+                if exception is not None:
+                    message = f"Error retrieving market data: {exception}"
+                    logger.error(f"❌ {symbol}: {message}")
+                    errors[symbol] = message
+                    continue
+
+                stock_data = future.result()
+
+                try:
+                    if stock_data is not None and len(stock_data) > 5:
+                        metrics = self.calculate_risk_from_price_data(stock_data)
+
+                        if metrics:
+                            risk_score = metrics['risk_score']
+                            if risk_score >= 0.7:
+                                risk_level = 'High'
+                            elif risk_score >= 0.4:
+                                risk_level = 'Medium'
+                            else:
+                                risk_level = 'Low'
+
+                            risk_data.append({
+                                'symbol': symbol,
+                                'risk_score': round(risk_score, 4),
+                                'risk_level': risk_level,
+                                'volatility': round(metrics['volatility'], 4),
+                                'momentum_5d': round(metrics['momentum_5d'], 4),
+                                'momentum_20d': round(metrics['momentum_20d'], 4),
+                                'rsi': round(metrics['rsi'], 2),
+                                'max_drawdown': round(metrics['max_drawdown'], 4),
+                                'last_updated': datetime.now().isoformat(),
+                            })
+                            logger.info(
+                                f"✅ {symbol}: risk={risk_score:.3f}, level={risk_level}"
+                            )
                         else:
-                            risk_level = 'Low'
-                        
-                        risk_data.append({
-                            'symbol': symbol,
-                            'risk_score': round(risk_score, 4),
-                            'risk_level': risk_level,
-                            'volatility': round(metrics['volatility'], 4),
-                            'momentum_5d': round(metrics['momentum_5d'], 4),
-                            'momentum_20d': round(metrics['momentum_20d'], 4),
-                            'rsi': round(metrics['rsi'], 2),
-                            'max_drawdown': round(metrics['max_drawdown'], 4),
-                            'last_updated': datetime.now().isoformat()
-                        })
-                        logger.info(f"✅ {symbol}: risk={risk_score:.3f}, level={risk_level}")
+                            message = (
+                                "Unable to calculate risk metrics from downloaded data"
+                            )
+                            logger.warning(f"⚠️ {symbol}: {message}")
+                            errors[symbol] = message
                     else:
-                        message = "Unable to calculate risk metrics from downloaded data"
+                        message = "Insufficient historical data returned for analysis"
                         logger.warning(f"⚠️ {symbol}: {message}")
                         errors[symbol] = message
-                else:
-                    message = "Insufficient historical data returned for analysis"
-                    logger.warning(f"⚠️ {symbol}: {message}")
+                except Exception as exc:
+                    message = f"Error processing market data: {exc}"
+                    logger.error(f"❌ {symbol}: {message}")
                     errors[symbol] = message
-
-            except Exception as e:
-                message = f"Error retrieving market data: {e}"
-                logger.error(f"❌ {symbol}: {message}")
+        except concurrent.futures.TimeoutError:
+            logger.error(
+                "Timed out while retrieving market data; cancelling remaining requests"
+            )
+            for future in pending_futures:
+                symbol = future_to_symbol[future]
+                message = "Timed out retrieving market data"
+                logger.error(f"⏱️ {symbol}: {message}")
                 errors[symbol] = message
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         # Update cache
         self.cache = risk_data
