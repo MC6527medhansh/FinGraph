@@ -41,3 +41,5 @@ Thumbs.db
 # Logs
 logs/
 *.log
+# Serialized model artifacts
+*.joblib

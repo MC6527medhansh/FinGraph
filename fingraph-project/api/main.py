@@ -22,7 +22,11 @@ from src.features.graph_data_loader import GraphDataLoader
 
 # Add project root to path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(project_root)
+if project_root not in sys.path:
+    sys.path.append(project_root)
+project_root_path = Path(project_root)
+
+from src.utils import load_artifact  # noqa: E402  (import after path tweak)
 
 PERFORMANCE_FILE = os.path.join(project_root, "models", "performance.json")
 PREDICTIONS_DIR = os.path.join(project_root, "data", "temporal_integration")
@@ -30,9 +34,20 @@ DEFAULT_PREDICTIONS_FILE = os.path.join(PREDICTIONS_DIR, "predictions.csv")
 DEFAULT_SUMMARY_FILE = os.path.join(PREDICTIONS_DIR, "dashboard_summary.json")
 SUPPORTED_DATA_SOURCES = {"live", "stored", "auto"}
 
+MODEL_PATH = project_root_path / "models" / "temporal_risk_model.json"
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+MODEL_ARTIFACT: Optional[Dict[str, Any]] = None
+try:
+    MODEL_ARTIFACT = load_artifact(MODEL_PATH)
+    logger.info("Loaded risk model artifact from %s", MODEL_PATH)
+except FileNotFoundError:
+    logger.warning("Risk model artifact not found at %s", MODEL_PATH)
+except Exception as exc:  # pragma: no cover - defensive logging
+    logger.error("Failed to load risk model artifact: %s", exc)
 
 app = FastAPI(
     title="FinGraph API",
@@ -66,16 +81,61 @@ class HealthStatus(BaseModel):
     unavailable_symbols: Dict[str, str] = Field(default_factory=dict)
 
 class RealTimeRiskCalculator:
-    """Calculate real-time risk scores from live market data"""
+    """Calculate real-time risk scores from live market data."""
 
-    def __init__(self, data_dir: Optional[str] = None):
+    def __init__(self, data_dir: Optional[str] = None, model_artifact: Optional[Dict[str, Any]] = None):
         self.data_dir = self._resolve_data_dir(data_dir)
         self.cache: List[Dict[str, Any]] = []
         self.cache_duration = 300  # 5 minutes cache
-        self.last_update = None
+        self.last_update: Optional[datetime] = None
         self.last_errors: Dict[str, str] = {}
         self.symbol_source = "default"
         self.symbols = self._load_symbols_from_dataset()
+
+        self.lookback_days = int(model_artifact.get("lookback_days", 60)) if model_artifact else 60
+        self.model_ready = False
+        self.model_feature_order: List[str] = []
+        self.model_coefficients: Optional[np.ndarray] = None
+        self.model_intercept: float = 0.0
+        self.model_feature_means: Optional[np.ndarray] = None
+        self.model_feature_stds: Optional[np.ndarray] = None
+        self.model_metadata: Dict[str, Any] = {}
+        self.model_metrics: Dict[str, Any] = {}
+
+        if model_artifact:
+            self._load_model_parameters(model_artifact)
+
+    def _load_model_parameters(self, artifact: Dict[str, Any]) -> None:
+        model_state = artifact.get("model", {})
+        feature_names = list(artifact.get("feature_names", []))
+        coefficients = model_state.get("coefficients")
+        intercept = model_state.get("intercept")
+        means = model_state.get("feature_means")
+        stds = model_state.get("feature_stds")
+
+        if not (feature_names and coefficients and means and stds):
+            logger.warning("Model artifact missing required fields; falling back to heuristic scoring")
+            return
+
+        if not (len(feature_names) == len(coefficients) == len(means) == len(stds)):
+            logger.warning("Model artifact dimensions do not align; falling back to heuristic scoring")
+            return
+
+        self.model_feature_order = feature_names
+        self.model_coefficients = np.array(coefficients, dtype=float)
+        self.model_intercept = float(intercept)
+        self.model_feature_means = np.array(means, dtype=float)
+        self.model_feature_stds = np.array(stds, dtype=float)
+        self.model_feature_stds[self.model_feature_stds == 0] = 1.0
+        self.model_ready = True
+        self.model_metadata = {
+            "trained_at": artifact.get("trained_at"),
+            "training_symbols": artifact.get("training_symbols", []),
+            "lookback_days": artifact.get("lookback_days"),
+            "feature_names": feature_names,
+        }
+        self.model_metrics = artifact.get("metrics", {}) or {}
+        logger.info("Risk calculator configured with persisted model coefficients")
 
     def _resolve_data_dir(self, data_dir: Optional[str]) -> Path:
         if data_dir:
@@ -110,75 +170,116 @@ class RealTimeRiskCalculator:
         logger.info(f"📋 Using default symbol list with {len(default_symbols)} entries")
         return default_symbols
     
-    def _should_refresh(self):
-        """Check if data should be refreshed"""
+    def _should_refresh(self) -> bool:
+        """Return ``True`` when cached values are stale."""
         if self.last_update is None:
             return True
         return (datetime.now() - self.last_update).seconds > self.cache_duration
-    
-    def calculate_risk_from_price_data(self, price_data):
-        """Calculate risk metrics from price data"""
-        if len(price_data) < 5:
+
+    def _compute_metrics(self, price_data: pd.DataFrame) -> Optional[Dict[str, float]]:
+        if price_data is None or len(price_data) < 5:
             return None
-        
-        # Calculate returns
-        returns = price_data['Close'].pct_change().dropna()
-        
-        if len(returns) < 2:
+
+        frame = price_data.copy()
+        if isinstance(frame.columns, pd.MultiIndex):
+            frame.columns = [col[0] if isinstance(col, tuple) else col for col in frame.columns]
+
+        required = {"Open", "High", "Low", "Close", "Volume"}
+        if not required.issubset(frame.columns):
+            missing = required.difference(frame.columns)
+            logger.warning("Price data missing required columns: %s", sorted(missing))
             return None
-        
-        # Calculate metrics
-        volatility = float(returns.std() * np.sqrt(252))  # Annualized
-        
-        # Recent price momentum (negative momentum = higher risk)
-        momentum_5d = float(returns.tail(5).mean()) if len(returns) >= 5 else 0
+
+        ordered = frame.loc[:, ["Open", "High", "Low", "Close", "Volume"]].sort_index()
+        ordered = ordered.ffill().dropna(subset=["Close"])
+        if ordered.empty:
+            return None
+
+        window = ordered.tail(max(self.lookback_days, 5))
+        returns = window["Close"].pct_change().dropna()
+        if returns.empty:
+            return None
+
+        volatility = float(np.clip(returns.std() * np.sqrt(252), 1e-4, 2.0))
+        momentum_5d = float(returns.tail(5).mean()) if len(returns) >= 5 else 0.0
         momentum_20d = float(returns.tail(20).mean()) if len(returns) >= 20 else momentum_5d
-        
-        # Maximum drawdown
+
         cumulative = (1 + returns).cumprod()
-        running_max = cumulative.expanding().max()
-        drawdown = ((cumulative - running_max) / running_max).min()
-        
-        # RSI for overbought/oversold
-        delta = price_data['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        running_max = cumulative.cummax()
+        drawdown = float(((cumulative - running_max) / running_max).min()) if not cumulative.empty else 0.0
+        max_drawdown = float(abs(drawdown))
+
+        delta = window["Close"].diff()
+        gain = delta.where(delta > 0, 0.0).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0.0)).rolling(window=14).mean()
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
-        current_rsi = float(rsi.iloc[-1]) if not rsi.empty else 50
-        
-        # Volume spike detection
-        avg_volume = price_data['Volume'].rolling(20).mean()
-        volume_ratio = (price_data['Volume'] / avg_volume).iloc[-1] if not avg_volume.empty else 1
-        
-        # Composite risk score calculation
-        # Normalize each component to 0-1 scale
-        vol_score = min(volatility / 0.8, 1.0)  # 80% annual vol = max risk
-        momentum_score = max(0, min(1, 0.5 - momentum_20d * 10))  # Negative momentum = higher risk
-        drawdown_score = min(abs(drawdown) / 0.3, 1.0)  # 30% drawdown = max risk
-        rsi_risk = 0.3 if 30 < current_rsi < 70 else 0.7  # Extreme RSI = higher risk
-        volume_spike_risk = min(volume_ratio / 3, 1.0) * 0.2  # Volume spikes add risk
-        
-        # Weighted composite
-        risk_score = (
-            vol_score * 0.35 +
-            momentum_score * 0.25 +
-            drawdown_score * 0.25 +
-            rsi_risk * 0.10 +
-            volume_spike_risk * 0.05
-        )
+        current_rsi = float(rsi.iloc[-1]) if not rsi.empty else 50.0
+        if np.isnan(current_rsi):
+            current_rsi = 50.0
 
-        risk_score = max(0.1, min(0.95, risk_score))  # Bound between 0.1 and 0.95
+        avg_volume = window["Volume"].rolling(20).mean()
+        if avg_volume.empty or np.isnan(avg_volume.iloc[-1]) or avg_volume.iloc[-1] <= 0:
+            volume_ratio = 1.0
+        else:
+            volume_ratio = float(np.clip(window["Volume"].iloc[-1] / avg_volume.iloc[-1], 0.1, 10.0))
 
         return {
-            'volatility': volatility,
-            'risk_score': risk_score,
-            'momentum_5d': momentum_5d,
-            'momentum_20d': momentum_20d,
-            'rsi': current_rsi,
-            'max_drawdown': abs(drawdown),
-            'volume_ratio': volume_ratio
+            "volatility": volatility,
+            "momentum_5d": momentum_5d,
+            "momentum_20d": momentum_20d,
+            "max_drawdown": max_drawdown,
+            "rsi": current_rsi,
+            "volume_ratio": volume_ratio,
         }
+
+    def _predict_with_model(self, metrics: Dict[str, float]) -> Optional[float]:
+        if (
+            not self.model_ready
+            or self.model_coefficients is None
+            or self.model_feature_means is None
+            or self.model_feature_stds is None
+        ):
+            return None
+
+        try:
+            values = np.array([float(metrics[name]) for name in self.model_feature_order], dtype=float)
+        except KeyError as exc:  # pragma: no cover - defensive
+            logger.debug("Missing feature for model prediction: %s", exc)
+            return None
+
+        standardized = (values - self.model_feature_means) / self.model_feature_stds
+        standardized = np.nan_to_num(standardized, nan=0.0)
+        prediction = float(np.dot(standardized, self.model_coefficients) + self.model_intercept)
+        return float(np.clip(prediction, 0.0, 1.0))
+
+    @staticmethod
+    def _heuristic_score(metrics: Dict[str, float]) -> float:
+        volatility_score = min(metrics["volatility"] / 0.8, 1.0)
+        momentum_score = max(0.0, min(1.0, 0.5 - metrics["momentum_20d"] * 10.0))
+        drawdown_score = min(metrics["max_drawdown"] / 0.3, 1.0)
+        rsi_risk = 0.3 if 30 < metrics["rsi"] < 70 else 0.7
+        volume_spike_risk = min(metrics["volume_ratio"] / 3.0, 1.0) * 0.2
+        score = (
+            volatility_score * 0.35
+            + momentum_score * 0.25
+            + drawdown_score * 0.25
+            + rsi_risk * 0.10
+            + volume_spike_risk * 0.05
+        )
+        return float(np.clip(score, 0.0, 1.0))
+
+    def calculate_risk_from_price_data(self, price_data: pd.DataFrame) -> Optional[Dict[str, float]]:
+        metrics = self._compute_metrics(price_data)
+        if metrics is None:
+            return None
+
+        prediction = self._predict_with_model(metrics)
+        if prediction is None:
+            prediction = self._heuristic_score(metrics)
+
+        metrics["risk_score"] = float(prediction)
+        return metrics
     
     def get_real_time_risk_scores(self):
         """Get real-time risk scores for all symbols"""
@@ -193,18 +294,19 @@ class RealTimeRiskCalculator:
         risk_data: List[Dict[str, Any]] = []
         errors: Dict[str, str] = {}
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=60)  # Get 60 days of data
+        history_span = max(self.lookback_days * 3, 120)
+        start_date = end_date - timedelta(days=history_span)
 
         for symbol in self.symbols:
             try:
                 # Download real-time data
                 stock_data = yf.download(
-                    symbol, 
+                    symbol,
                     start=start_date.strftime('%Y-%m-%d'),
                     end=end_date.strftime('%Y-%m-%d'),
                     progress=False
                 )
-                
+
                 if len(stock_data) > 5:
                     # Calculate risk metrics
                     metrics = self.calculate_risk_from_price_data(stock_data)
@@ -254,7 +356,7 @@ class RealTimeRiskCalculator:
         return risk_data
     
 # Global calculator instance
-risk_calculator = RealTimeRiskCalculator()
+risk_calculator = RealTimeRiskCalculator(model_artifact=MODEL_ARTIFACT)
 
 
 def stored_predictions_available(path: str = DEFAULT_PREDICTIONS_FILE) -> bool:
@@ -488,6 +590,16 @@ async def root():
         except OSError:
             stored_last_update = None
 
+    model_info = {
+        "loaded": bool(risk_calculator.model_ready),
+        "lookback_days": risk_calculator.lookback_days,
+        "trained_at": risk_calculator.model_metadata.get("trained_at") if risk_calculator.model_metadata else None,
+        "training_symbols": risk_calculator.model_metadata.get("training_symbols", []) if risk_calculator.model_metadata else [],
+        "feature_names": risk_calculator.model_metadata.get("feature_names", []) if risk_calculator.model_metadata else [],
+        "metrics": risk_calculator.model_metrics,
+        "artifact_path": str(MODEL_PATH),
+    }
+
     return {
         "message": "FinGraph API - Real-Time Financial Risk Assessment",
         "version": "2.0.0",
@@ -517,7 +629,8 @@ async def root():
             "tracked": list(risk_calculator.symbols),
             "available": cached_symbols,
             "unavailable": dict(risk_calculator.last_errors)
-        }
+        },
+        "model": model_info,
     }
 
 @app.get("/health", response_model=HealthStatus)
