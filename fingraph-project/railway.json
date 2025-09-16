@@ -1,7 +1,0 @@
-{
-    "deploy": {
-      "restartPolicyType": "ON_FAILURE",
-      "sleepApplication": false,
-      "numReplicas": 1
-    }
-  }
