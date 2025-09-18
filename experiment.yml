@@ -1,0 +1,310 @@
+# FinGraph Production Configuration
+# All hyperparameters and settings for reproducible experiments
+
+# Experiment metadata
+experiment:
+  name: "fingraph_production_v1"
+  description: "Production GNN for financial risk prediction"
+  author: "Quant Team"
+  date: "2024-01-01"
+  random_seed: 42
+  
+# Data configuration
+data:
+  # Symbols to trade (use liquid, high-volume stocks)
+  symbols:
+    - AAPL   # Apple
+    - MSFT   # Microsoft
+    - GOOGL  # Google
+    - AMZN   # Amazon
+    - TSLA   # Tesla
+    - META   # Meta
+    - NVDA   # NVIDIA
+    - NFLX   # Netflix
+    - CRM    # Salesforce
+    - ADBE   # Adobe
+    - JPM    # JP Morgan
+    - BAC    # Bank of America
+    - XOM    # Exxon
+    - CVX    # Chevron
+    - UNH    # UnitedHealth
+    
+  # Date range for training
+  start_date: "2019-01-01"
+  end_date: "2024-01-01"
+  
+  # Data requirements
+  min_history_days: 252  # 1 year minimum history
+  label_horizon: 21      # Predict 21 days forward
+  sample_frequency: 5    # Sample every 5 days to reduce correlation
+  
+  # Data quality thresholds
+  max_missing_pct: 0.1   # Maximum 10% missing data
+  min_volume: 1000000    # Minimum daily volume
+  
+# Feature engineering
+features:
+  # Price-based features
+  price_features:
+    - returns_1d
+    - returns_5d
+    - returns_20d
+    - returns_60d
+    - log_returns_1d
+    
+  # Volatility features
+  volatility_features:
+    - realized_vol_5d
+    - realized_vol_20d
+    - realized_vol_60d
+    - garch_vol
+    
+  # Technical indicators
+  technical_features:
+    - rsi_14
+    - macd_signal
+    - bollinger_position
+    - stochastic_k
+    - williams_r
+    
+  # Volume features
+  volume_features:
+    - volume_ratio_5d
+    - volume_ratio_20d
+    - dollar_volume
+    - amihud_illiquidity
+    
+  # Microstructure features
+  microstructure_features:
+    - bid_ask_spread
+    - close_to_high
+    - close_to_low
+    - daily_range
+    - overnight_gap
+    
+  # Market regime features
+  regime_features:
+    - distance_from_52w_high
+    - distance_from_52w_low
+    - trend_strength
+    - regime_probability
+
+# Graph construction
+graph:
+  # Edge creation thresholds
+  correlation_threshold: 0.3
+  top_k_edges: 50
+  
+  # Graph types
+  include_correlation_edges: true
+  include_sector_edges: true
+  include_economic_edges: true
+  
+  # Dynamic graph parameters
+  lookback_window: 60  # Days for correlation calculation
+  update_frequency: 5   # Rebuild graph every N days
+  
+  # Node types
+  node_types:
+    - company
+    - sector
+    - economic_indicator
+
+# Model architecture
+model:
+  # GNN architecture
+  architecture: "GAT"  # Graph Attention Network
+  hidden_dim: 128
+  num_heads: 8
+  num_layers: 3
+  dropout: 0.2
+  
+  # Multi-task learning
+  tasks:
+    - risk_prediction
+    - volatility_forecast
+    - return_prediction
+  
+  # Task weights
+  risk_weight: 1.0
+  volatility_weight: 0.5
+  return_weight: 0.3
+  
+  # Activation and normalization
+  activation: "relu"
+  use_batch_norm: true
+  use_layer_norm: false
+  
+# Training configuration
+training:
+  # Optimization
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  gradient_clip: 1.0
+  
+  # Batch settings
+  batch_size: 32
+  accumulate_gradients: 1
+  
+  # Training schedule
+  num_epochs: 100
+  warmup_epochs: 5
+  
+  # Early stopping
+  early_stopping_patience: 10
+  early_stopping_metric: "val_loss"
+  early_stopping_mode: "min"
+  
+  # Learning rate schedule
+  scheduler: "reduce_on_plateau"
+  scheduler_patience: 5
+  scheduler_factor: 0.5
+  
+  # Regularization
+  use_dropout: true
+  use_weight_decay: true
+  label_smoothing: 0.0
+
+# Validation configuration
+validation:
+  # Validation mode
+  strict_mode: true  # Fail on any integrity violation
+  
+  # Temporal validation
+  check_lookahead: true
+  check_overlap: true
+  check_monotonicity: true
+  
+  # Statistical validation
+  check_distribution: true
+  check_correlation: true
+  max_feature_correlation: 0.95
+  
+  # Bootstrap validation
+  bootstrap_samples: 1000
+  confidence_level: 0.95
+  
+  # Performance thresholds
+  min_sharpe_ratio: 0.5
+  max_drawdown: 0.30
+  min_correlation: 0.1
+
+# Backtesting configuration
+backtest:
+  # Capital and position sizing
+  initial_capital: 1000000
+  position_size: 0.02  # 2% per position
+  max_positions: 20
+  max_leverage: 1.0
+  
+  # Transaction costs (realistic)
+  commission_bps: 10   # 10 basis points
+  slippage_bps: 5      # 5 basis points
+  borrowing_cost_bps: 50  # 50 bps annually for shorts
+  
+  # Risk management
+  stop_loss: 0.05       # 5% stop loss
+  take_profit: 0.10     # 10% take profit
+  max_portfolio_risk: 0.15  # 15% portfolio VaR
+  max_sector_concentration: 0.30
+  
+  # Rebalancing
+  rebalance_frequency: "weekly"  # daily, weekly, monthly
+  min_holding_period: 1  # Minimum days to hold
+  
+  # Baseline comparison
+  compare_with_baseline: true
+  baseline_strategy: "equal_weight_buy_hold"
+
+# Inference configuration
+inference:
+  # Caching
+  cache_ttl: 300  # 5 minutes
+  use_cache: true
+  
+  # Batching
+  max_batch_size: 50
+  batch_timeout_ms: 100
+  
+  # Performance
+  max_latency_ms: 1000
+  timeout_seconds: 30
+  
+  # Confidence estimation
+  include_confidence: true
+  confidence_method: "dropout"
+  confidence_samples: 100
+  
+  # API settings
+  api_port: 8000
+  api_workers: 4
+  rate_limit: 1000  # Requests per minute
+
+# Monitoring and logging
+monitoring:
+  # Logging
+  log_level: "INFO"
+  log_to_file: true
+  log_dir: "logs"
+  
+  # Metrics tracking
+  track_metrics: true
+  metrics_backend: "tensorboard"
+  metrics_dir: "metrics"
+  
+  # Model versioning
+  version_models: true
+  max_model_versions: 10
+  
+  # Alerts
+  enable_alerts: true
+  alert_on_validation_failure: true
+  alert_on_performance_degradation: true
+  performance_degradation_threshold: 0.2
+
+# Hardware configuration
+hardware:
+  # Device selection
+  device: "auto"  # auto, cpu, cuda, mps
+  mixed_precision: false
+  
+  # Memory management
+  gradient_checkpointing: false
+  empty_cache_freq: 10  # Empty GPU cache every N batches
+  
+  # Parallelization
+  num_workers: 4
+  pin_memory: true
+
+# Reproducibility
+reproducibility:
+  # Random seeds
+  random_seed: 42
+  numpy_seed: 42
+  torch_seed: 42
+  
+  # Deterministic operations
+  deterministic: true
+  benchmark: false
+  
+# Paths
+paths:
+  # Data paths
+  data_dir: "data"
+  cache_dir: "data/cache"
+  raw_data_dir: "data/raw"
+  processed_data_dir: "data/processed"
+  
+  # Model paths
+  models_dir: "models"
+  checkpoints_dir: "models/checkpoints"
+  production_dir: "models/production"
+  
+  # Results paths
+  results_dir: "results"
+  artifacts_dir: "artifacts"
+  reports_dir: "reports"
+  
+  # Logs
+  logs_dir: "logs"
+  tensorboard_dir: "logs/tensorboard"
