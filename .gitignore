@@ -1,0 +1,56 @@
+# === Root-level ignores ===
+
+# Virtual environments at repo root
+.venv/
+venv/
+ENV/
+
+# Bytecode & caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Packaging / build
+build/
+dist/
+.eggs/
+*.egg-info/
+wheels/
+share/python-wheels/
+pip-wheel-metadata/
+pip-log.txt
+
+# Test/coverage
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+logs/
+log/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# === Project-specific (FinGraph) located in ./fingraph-project ===
+fingraph-project/data/
+fingraph-project/outputs/
+fingraph-project/models/
+fingraph-project/artifacts/
+fingraph-project/cache/
+fingraph-project/notebooks/.ipynb_checkpoints/
+fingraph-project/.streamlit/
+fingraph-project/**/.streamlit/
+fingraph-project/reports/
+fingraph-project/exports/
+fingraph-project/.fingraph-venv/

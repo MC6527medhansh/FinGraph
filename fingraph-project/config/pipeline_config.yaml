@@ -1,0 +1,122 @@
+# Master Configuration for FinGraph Pipeline
+# This is the ONLY configuration file we'll use
+
+pipeline:
+  name: "fingraph_production"
+  version: "2.0.0"
+  description: "Unified FinGraph Pipeline"
+  
+data:
+  # Stock symbols to track
+  symbols:
+    - AAPL
+    - MSFT
+    - GOOGL
+    - AMZN
+    - TSLA
+    - META
+    - NVDA
+    - JPM
+    - V
+    - JNJ
+    
+  # Date range for historical data
+  start_date: "2020-01-01"
+  end_date: "null"
+  
+  # Data quality thresholds
+  min_history_days: 252  # 1 year
+  max_missing_pct: 0.05  # 5% max missing
+  
+  # Cache settings
+  cache_dir: "data/cache"
+  cache_ttl_hours: 24
+  
+features:
+  # Lookback windows for features
+  windows: [5, 10, 20, 60, 120]
+  
+  # Feature groups to calculate
+  feature_groups:
+    - returns
+    - volatility
+    - technical
+    - volume
+    - microstructure
+  
+  # Temporal settings
+  label_horizon: 21  # Predict 21 days forward
+  min_samples_per_symbol: 100
+  
+model:
+  # GNN architecture
+  architecture: "GAT"
+  hidden_dim: 128
+  num_heads: 8
+  num_layers: 3
+  dropout: 0.2
+  
+  # Training settings
+  batch_size: 32
+  learning_rate: 0.001
+  num_epochs: 100
+  early_stopping_patience: 10
+  
+  # Loss weights
+  risk_weight: 1.0
+  return_weight: 0.5
+  volatility_weight: 0.3
+
+graph:
+  correlation_threshold: 0.3
+  max_edges_per_node: 10
+  edge_features: 3  # correlation, abs_correlation, positive_flag
+
+backtesting:
+  initial_capital: 1000000
+  position_sizing: "equal_weight"  # or "kelly", "risk_parity"
+  max_positions: 10
+  
+  # Transaction costs (realistic)
+  commission_pct: 0.001  # 10 bps
+  slippage_pct: 0.0005   # 5 bps
+  
+  # Risk limits
+  max_position_pct: 0.10  # 10% max per position
+  max_sector_pct: 0.30    # 30% max per sector
+  max_drawdown: 0.15      # 15% max drawdown
+  stop_loss: 0.05         # 5% stop loss
+  
+  # Rebalancing
+  rebalance_frequency: "weekly"
+  min_holding_days: 2
+  
+validation:
+  train_pct: 0.6
+  val_pct: 0.2
+  test_pct: 0.2
+  
+  # Temporal gaps between splits (days)
+  train_val_gap: 5
+  val_test_gap: 5
+  
+  # Integrity checks
+  check_lookahead: true
+  check_stationarity: true
+  check_correlation: true
+  
+paths:
+  data_dir: "data"
+  model_dir: "data/models"
+  log_dir: "logs"
+  report_dir: "reports"
+  
+api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 4
+  
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/pipeline.log"
