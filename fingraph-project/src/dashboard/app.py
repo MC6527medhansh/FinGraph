@@ -26,13 +26,13 @@ def load_latest_signals():
     return pd.DataFrame()
 
 # Header
-st.title("🚀 FinGraph Trading Dashboard")
+st.title("FinGraph Trading Dashboard")
 st.markdown("---")
 
 # Sidebar controls
 with st.sidebar:
     st.header("Controls")
-    if st.button("🔄 Refresh Signals", type="primary"):
+    if st.button("Refresh Signals", type="primary"):
         refresh_signals()
         st.rerun()
     
@@ -65,7 +65,7 @@ else:
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("📈 BUY Signals")
+        st.subheader("BUY Signals")
         buys = signals[signals['recommendation'].isin(['BUY', 'STRONG_BUY'])].sort_values('rank')
         if not buys.empty:
             st.dataframe(buys[['symbol', 'recommendation', 'return_forecast', 'risk_score', 'signal_strength']],
@@ -74,7 +74,7 @@ else:
             st.info("No buy signals")
     
     with col2:
-        st.subheader("📉 SELL Signals")
+        st.subheader("SELL Signals")
         sells = signals[signals['recommendation'] == 'SELL'].sort_values('rank')
         if not sells.empty:
             st.dataframe(sells[['symbol', 'recommendation', 'return_forecast', 'risk_score']],
@@ -105,5 +105,5 @@ else:
         st.plotly_chart(fig, use_container_width=True)
     
     # Full data table
-    with st.expander("📊 View All Signals"):
+    with st.expander("View All Signals"):
         st.dataframe(signals, use_container_width=True)

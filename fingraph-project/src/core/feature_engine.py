@@ -14,7 +14,7 @@ warnings.filterwarnings('ignore')
 logger = logging.getLogger(__name__)
 
 
-class FeatureEngine:
+class UnifiedFeatureEngine:
     """
     Single feature engineering class for entire pipeline.
     Guarantees temporal integrity - NO LOOKAHEAD BIAS.
@@ -65,17 +65,19 @@ class FeatureEngine:
         return names
     
     def create_features(self, 
-                       data: pd.DataFrame,
-                       point_in_time: bool = True) -> pd.DataFrame:
+                        data: pd.DataFrame,
+                        point_in_time: bool = True) -> pd.DataFrame:
         """
-        Create all features from price data.
-        
+        Create all features from price data (TRAINING PATH).
+        Produces features + FORWARD LABELS, so the most recent dates
+        will be excluded by the label horizon.
+
         Args:
-            data: Price data from DataManager
-            point_in_time: If True, ensure no lookahead bias
+            data: tidy OHLCV with ['open','high','low','close','volume','symbol'] and DatetimeIndex
+            point_in_time: kept for compatibility; features are PIT by design
             
         Returns:
-            DataFrame with features
+            DataFrame with features (+ forward labels for training)
         """
         logger.info("Creating features with temporal integrity")
         
@@ -96,9 +98,8 @@ class FeatureEngine:
         logger.info(f"Created {len(all_features)} feature vectors")
 
         # ============================
-        # ✱ NEW: Cross-sectional labels (correct place to do it)
+        # ✱ Cross-sectional labels (computed AFTER concatenation) — TRAINING ONLY
         # ============================
-        ### ✱ NEW — compute cross-sectional z-scores/percentiles by date, AFTER concatenation
         if 'forward_return' in all_features.columns:
             all_features['forward_return_cs_z'] = all_features.groupby('date')['forward_return']\
                 .transform(lambda s: (s - s.mean()) / (s.std() + 1e-8))
@@ -111,7 +112,7 @@ class FeatureEngine:
             all_features['risk_score_cs_pct'] = all_features.groupby('date')['forward_volatility']\
                 .transform(lambda s: s.rank(pct=True))
 
-        # If you want to *train directly* on cross-sectional targets, uncomment:
+        # If you want to train on cross-sectional targets directly, you can map them here:
         # all_features['forward_return']     = all_features['forward_return_cs_z']
         # all_features['forward_volatility'] = all_features['forward_volatility_cs_z']
         # all_features['risk_score']         = all_features['risk_score_cs_pct']
@@ -120,15 +121,14 @@ class FeatureEngine:
         return all_features
     
     def _create_symbol_features(self, 
-                               data: pd.DataFrame,
-                               symbol: str) -> pd.DataFrame:
-        """Create features for a single symbol"""
+                                data: pd.DataFrame,
+                                symbol: str) -> pd.DataFrame:
+        """Create features for a single symbol (TRAINING PATH)."""
         
         # Sort by date
         data = data.sort_index()
 
-        # ✱ NEW — add return_1d for anyone who needs it (not used for labels below)
-        ### ✱ NEW
+        # ✱ ensure a daily return exists for other components that may rely on it
         data['return_1d'] = data['close'].pct_change()
 
         # Need minimum history
@@ -155,8 +155,6 @@ class FeatureEngine:
                 # Calculate forward labels (for training) using ONLY the future window for THIS symbol
                 future_data = data.iloc[i:i+self.label_horizon]
 
-                # ✱ CHANGED — call the corrected forward-label function (no return_1d dependency)
-                ### ✱ CHANGED
                 labels = self._calculate_forward_labels(future_data)
                 
                 if labels is not None:
@@ -172,8 +170,8 @@ class FeatureEngine:
         return pd.DataFrame(feature_list)
     
     def _calculate_point_in_time_features(self, 
-                                         data: pd.DataFrame,
-                                         date: datetime) -> Optional[Dict]:
+                                          data: pd.DataFrame,
+                                          date: datetime) -> Optional[Dict]:
         """
         Calculate features using only historical data up to date.
         This ensures no lookahead bias.
@@ -261,7 +259,7 @@ class FeatureEngine:
             return None
     
     # ============================
-    # ✱ CHANGED: Correct forward labels (no return_1d dependency; use future window)
+    # ✱ Correct forward labels (TRAINING PATH) — no dependency on return_1d
     # ============================
     def _calculate_forward_labels(self, future_data: pd.DataFrame) -> Optional[Dict]:
         """Compute forward labels for ONE symbol using only its future window."""
@@ -320,3 +318,87 @@ class FeatureEngine:
         rs = avg_gain / (avg_loss + 1e-12)
         rsi = 100 - (100 / (1 + rs))
         return rsi
+
+    # ============================================================
+    # [NEW]  PREDICTION-ONLY FEATURE PATH (no labels, latest date)
+    # ============================================================
+    def create_features_for_prediction(
+        self,
+        prices: pd.DataFrame,
+        *,
+        min_history_days_pred: int = None,
+        end_date: Optional[pd.Timestamp] = None
+    ) -> pd.DataFrame:
+        """
+        Build features for the most recent tradable day WITHOUT labels.
+        This is the path you use in live inference.
+
+        Args:
+            prices: tidy OHLCV with columns ['open','high','low','close','volume','symbol'] and DatetimeIndex
+            min_history_days_pred: override for prediction min history (defaults to training min_history_days)
+            end_date: force a specific as-of date (timezone-naive); defaults to prices.index.max()
+
+        Returns:
+            DataFrame with columns ['date','symbol', <all feature columns>] and NO forward-looking labels
+        """
+        if prices.empty:
+            return pd.DataFrame()
+
+        # Normalize timezone
+        if getattr(prices.index, "tz", None) is not None:
+            prices = prices.tz_localize(None)
+
+        # Minimum history for inference (can be <= training)
+        min_hist = (
+            int(min_history_days_pred)
+            if min_history_days_pred is not None
+            else int(self.config["data"]["min_history_days"])
+        )
+
+        # Latest available date
+        asof_date = end_date if end_date is not None else prices.index.max()
+
+        # Ensure a common date across all symbols (step back a few days if needed)
+        symbols = sorted(prices["symbol"].unique())
+        candidate_date = asof_date
+        max_lookback_days = 10
+
+        for _ in range(max_lookback_days + 1):
+            ok = True
+            for sym in symbols:
+                df_sym = prices[prices["symbol"] == sym]
+                if df_sym.empty or candidate_date not in df_sym.index:
+                    ok = False
+                    break
+            if ok:
+                break
+            candidate_date -= pd.Timedelta(days=1)
+
+        # Build features at candidate_date for each symbol (NO labels)
+        rows = []
+        for sym in symbols:
+            df_sym = prices[prices["symbol"] == sym].sort_index()
+            hist = df_sym[df_sym.index <= candidate_date]
+
+            if len(hist) < min_hist:
+                logger.warning(f"Skipping {sym}: insufficient history ({len(hist)} < {min_hist})")
+                continue
+
+            feats = self._calculate_point_in_time_features(hist, candidate_date)
+            if feats is None:
+                continue
+
+            clean = {k: float(v) if pd.notna(v) else 0.0 for k, v in feats.items()}
+            rows.append({"date": candidate_date, "symbol": sym, **clean})
+
+        return pd.DataFrame(rows)
+
+    # [NEW]
+    def latest_trading_day(self, prices: pd.DataFrame) -> Optional[pd.Timestamp]:
+        """Helper to get the latest trading day (timezone-naive)."""
+        if prices.empty:
+            return None
+        idx = prices.index
+        if getattr(idx, "tz", None) is not None:
+            idx = idx.tz_localize(None)
+        return idx.max()
