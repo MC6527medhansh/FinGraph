@@ -77,7 +77,7 @@ class DataCache:
         logger.info(f"Cached data with key {key}")
 
 
-class UnifiedDataManager:
+class DataManager:
     """
     Single source of truth for ALL data operations in FinGraph.
     This replaces all existing data loaders and collectors.

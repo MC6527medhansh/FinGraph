@@ -131,3 +131,50 @@ class TemporalGraphBuilder:
                 
         logger.info(f"Created {len(graphs)} temporal graphs")
         return graphs
+    
+    def build_graph_for_prediction(self, 
+                               features_df: pd.DataFrame,
+                               date: pd.Timestamp) -> Data:
+        """
+        Build graph for prediction (no labels required)
+        
+        Args:
+            features_df: Feature dataframe WITHOUT labels
+            date: Date to build graph for
+            
+        Returns:
+            PyTorch Geometric Data object for inference
+        """
+        # Filter features for this date
+        date_features = features_df[features_df['date'] == date].copy()
+        
+        if len(date_features) == 0:
+            logger.warning(f"No features for date {date}")
+            return None
+            
+        # Create node features (excluding metadata columns)
+        feature_cols = [col for col in date_features.columns 
+                    if col not in ['date', 'symbol']]
+        
+        node_features = date_features[feature_cols].values
+        x = torch.FloatTensor(node_features)
+        
+        # Create edges based on correlation
+        edges, edge_attr = self._create_edges(date_features, feature_cols)
+        
+        # Create graph WITHOUT labels (for prediction)
+        graph = Data(
+            x=x,
+            edge_index=edges,
+            edge_attr=edge_attr,
+            symbols=date_features['symbol'].tolist(),
+            date=date
+        )
+        
+        # Add dummy labels with zeros (model expects them but won't use them)
+        num_nodes = len(date_features)
+        graph.y_risk = torch.zeros(num_nodes)
+        graph.y_return = torch.zeros(num_nodes)
+        graph.y_volatility = torch.zeros(num_nodes)
+        
+        return graph

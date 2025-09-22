@@ -14,7 +14,7 @@ warnings.filterwarnings('ignore')
 logger = logging.getLogger(__name__)
 
 
-class UnifiedFeatureEngine:
+class FeatureEngine:
     """
     Single feature engineering class for entire pipeline.
     Guarantees temporal integrity - NO LOOKAHEAD BIAS.
