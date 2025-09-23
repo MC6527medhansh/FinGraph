@@ -54,3 +54,160 @@ fingraph-project/**/.streamlit/
 fingraph-project/reports/
 fingraph-project/exports/
 fingraph-project/.fingraph-venv/
+
+# ================================
+# Base Python
+# ================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Packaging / build
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-wheel-metadata/
+pip-log.txt
+
+# ================================
+# Virtual environments
+# ================================
+.venv/
+venv/
+env/
+ENV/
+.fingraph-venv/
+
+# ================================
+# Notebooks
+# ================================
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# ================================
+# Unit test / coverage
+# ================================
+.coverage
+.tox/
+.nox/
+.pytest_cache/
+htmlcov/
+
+# ================================
+# Logs
+# ================================
+*.log
+logs/
+log/
+
+# ================================
+# IDE / Editors
+# ================================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ================================
+# OS cruft
+# ================================
+.DS_Store
+Thumbs.db
+
+# ================================
+# Streamlit
+# ================================
+.streamlit/
+**/.streamlit/
+**/.streamlit/cache/
+**/.streamlit/secrets.toml
+
+# ================================
+# Local env & secrets
+# ================================
+.env
+*.env
+.env.*.local
+.envrc
+
+# ================================
+# Project data & artifacts (FinGraph)
+# ================================
+# Data folders (use .gitkeep if you want to keep structure)
+data/raw/
+data/processed/
+data/temporal_integration/
+data/cache/
+data/tmp/
+data/interim/
+data/external/
+
+# Models & experiment outputs
+data/models/
+models/
+models/checkpoints/
+models/production/
+outputs/
+artifacts/
+runs/
+wandb/
+mlruns/
+tb_logs/
+tensorboard/
+
+# Keep directory markers if desired
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/cache/.gitkeep
+!data/tmp/.gitkeep
+!data/interim/.gitkeep
+!data/external/.gitkeep
+!data/models/.gitkeep
+!models/.gitkeep
+!models/checkpoints/.gitkeep
+!models/production/.gitkeep
+
+# ================================
+# Large artifact filetypes
+# ================================
+# Model weights / checkpoints
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.pb
+
+# Columnar / binary datasets
+*.parquet
+*.feather
+*.arrow
+*.h5
+*.hdf5
+*.npz
+*.npy
+
+# (Optional) Big tabular exports
+*.csv
+*.tsv
+
+# ================================
+# Reports / exports
+# ================================
+reports/
+exports/
