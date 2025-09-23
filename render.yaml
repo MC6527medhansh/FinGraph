@@ -28,7 +28,7 @@ services:
       pip install --upgrade pip
       pip install -r requirements.txt
       mkdir -p data/signals data/models data/processed
-    command: python scripts/generate_signals.py
+      python scripts/generate_signals.py
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
