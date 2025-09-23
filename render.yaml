@@ -1,8 +1,8 @@
 services:
-  # Web Service - Dashboard
+  # === Web Service: Streamlit Dashboard ===
   - type: web
     name: fingraph-dashboard
-    env: python            # ← use 'env', not 'runtime'
+    env: python
     plan: free
     buildCommand: |
       pip install --upgrade pip
@@ -18,17 +18,17 @@ services:
       - key: RENDER
         value: "true"
 
-  # Background Worker - Signal Generation (Cron Job)
+  # === Cron Worker: generates signals daily ===
   - type: cron
     name: fingraph-signal-generator
-    env: python            # ← use 'env', not 'runtime'
+    env: python
     plan: free
-    schedule: "0 21 * * *"  # 9pm UTC daily
+    schedule: "0 21 * * *"   # 9pm UTC daily; adjust if you want
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
       mkdir -p data/signals data/models data/processed
-      python scripts/generate_signals.py
+    command: python scripts/generate_signals.py
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
