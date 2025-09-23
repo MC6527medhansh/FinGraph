@@ -1,0 +1,34 @@
+databases: []
+
+services:
+  # Web Service - Dashboard
+  - type: web
+    name: fingraph-dashboard
+    runtime: python
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+      mkdir -p data/signals data/models data/processed
+      python scripts/health_check.py --validate
+    startCommand: streamlit run dashboard/app.py --server.port $PORT --server.address 0.0.0.0
+    healthCheckPath: /
+    envVars:
+      - key: PYTHONPATH
+        value: /opt/render/project/src
+      - key: RENDER
+        value: true
+      - key: PYTHON_VERSION
+        value: 3.11.0
+
+  # Background Worker - Signal Generation (Cron Job)
+  - type: cron
+    name: fingraph-signal-generator
+    runtime: python
+    schedule: "0 21 * * *"  # 9pm UTC daily
+    buildCommand: pip install -r requirements.txt
+    command: python scripts/generate_signals.py --production
+    envVars:
+      - key: PYTHONPATH
+        value: /opt/render/project/src
+      - key: RENDER
+        value: true
