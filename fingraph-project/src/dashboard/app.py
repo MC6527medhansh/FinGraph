@@ -11,6 +11,9 @@ from pathlib import Path
 from datetime import datetime
 import subprocess
 
+if not os.path.exists('data/signals/latest_signals.csv'):
+    subprocess.run(['python', 'scripts/generate_signals.py'])
+    
 # Production detection
 IS_PRODUCTION = os.environ.get('RENDER', False)
 
