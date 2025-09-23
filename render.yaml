@@ -1,10 +1,10 @@
-databases: []
-
 services:
-  # Web Service - Dashboard
+  # Web Service - Dashboard (Streamlit)
   - type: web
     name: fingraph-dashboard
-    runtime: python
+    env: python
+    plan: free
+    autoDeploy: true
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
@@ -16,19 +16,18 @@ services:
       - key: PYTHONPATH
         value: /opt/render/project/src
       - key: RENDER
-        value: true
-      - key: PYTHON_VERSION
-        value: 3.11.0
+        value: "true"
 
-  # Background Worker - Signal Generation (Cron Job)
+  # Background Worker - Signal Generation (Cron)
   - type: cron
     name: fingraph-signal-generator
-    runtime: python
-    schedule: "0 21 * * *"  # 9pm UTC daily
+    env: python
+    plan: free
+    schedule: "0 21 * * *"           # 9pm UTC daily
     buildCommand: pip install -r requirements.txt
     command: python scripts/generate_signals.py --production
     envVars:
       - key: PYTHONPATH
         value: /opt/render/project/src
       - key: RENDER
-        value: true
+        value: "true"
