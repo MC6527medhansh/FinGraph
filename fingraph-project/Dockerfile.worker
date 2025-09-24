@@ -1,0 +1,33 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app
+
+WORKDIR /app
+
+# Install system dependencies needed for PyTorch and ML packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl && \
+    rm -rf /var/lib/apt/lists/* && \
+    apt-get clean
+
+# Copy and install worker requirements (includes PyTorch)
+COPY worker-requirements.txt .
+RUN pip install --no-cache-dir -r worker-requirements.txt && \
+    pip cache purge && \
+    find /usr/local/lib/python3.11 -name "*.pyc" -delete && \
+    find /usr/local/lib/python3.11 -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+
+# Copy only files needed for worker
+COPY src/ src/
+COPY scripts/ scripts/
+COPY config/ config/
+
+# Clean up application files
+RUN find /app -name "*.pyc" -delete && \
+    find /app -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+
+CMD ["python", "scripts/generate_signals.py", "--production"]
