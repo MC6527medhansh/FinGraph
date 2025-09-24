@@ -16,17 +16,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential curl && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy only dashboard deps first (better caching)
-COPY dashboard-requirements.txt /app/dashboard-requirements.txt
+# Copy requirements files
+COPY requirements.txt /app/requirements.txt
+COPY dashboard-requirements.txt /app/dashboard-requirements.txt  
+COPY worker-requirements.txt /app/worker-requirements.txt
+
+# Install all dependencies
 RUN python -m pip install --upgrade pip && \
+    python -m pip install -r /app/requirements.txt && \
+    python -m pip install -r /app/worker-requirements.txt && \
     python -m pip install -r /app/dashboard-requirements.txt
 
 # Copy app code
 COPY . /app
 
-# Streamlit listens on $PORT from Railway
+# Default port for dashboard
 EXPOSE 8000
 ENV PORT=8000
 
-# Start Streamlit
+# Default CMD (dashboard services can override, worker uses start command)
 CMD ["sh","-lc","python -m streamlit run src/dashboard/app.py --server.port ${PORT:-8080} --server.address 0.0.0.0"]
