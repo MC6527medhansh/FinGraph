@@ -1,7 +1,6 @@
-# Slim, reliable, and includes pip
-FROM python:3.11-slim
+# Multi-stage build to reduce final image size
+FROM python:3.11-slim as base
 
-# Avoid interactive prompts, speed up pip, and quiet Streamlit telemetry
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -11,26 +10,33 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# System deps needed by pandas/pyarrow on slim
+# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential curl && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    apt-get clean
 
-# Copy both requirements files (better caching)
-COPY dashboard-requirements.txt /app/dashboard-requirements.txt
-COPY worker-requirements.txt /app/worker-requirements.txt
+# Copy requirements
+COPY dashboard-requirements.txt worker-requirements.txt ./
 
-# Install all dependencies
+# Install Python dependencies and clean up in same layer to reduce size
 RUN python -m pip install --upgrade pip && \
-    python -m pip install -r /app/dashboard-requirements.txt && \
-    python -m pip install -r /app/worker-requirements.txt
+    python -m pip install -r dashboard-requirements.txt && \
+    python -m pip install -r worker-requirements.txt && \
+    pip cache purge && \
+    find /usr/local/lib/python3.11 -name "*.pyc" -delete && \
+    find /usr/local/lib/python3.11 -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
-# Copy app code
+# Copy application code
 COPY . /app
 
-# Streamlit listens on $PORT from Railway
+# Remove unnecessary files to reduce image size
+RUN rm -rf /app/.git* /app/README.md /app/render.yaml && \
+    find /app -name "*.pyc" -delete && \
+    find /app -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+
 EXPOSE 8000
 ENV PORT=8000
 
-# Start Streamlit (default CMD - worker service will override with start command)
+# Default command (dashboard) - worker will override via start command
 CMD ["sh","-lc","python -m streamlit run src/dashboard/app.py --server.port ${PORT:-8080} --server.address 0.0.0.0"]
