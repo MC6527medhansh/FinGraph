@@ -1,8 +1,7 @@
-# fingraph-project/requirements.txt  (LIGHT, shared)
+streamlit==1.32.0
 pandas==2.0.3
 numpy==1.24.3
-pyyaml==6.0.1
-yfinance==0.2.40
-streamlit==1.32.0
 plotly==5.18.0
-requests==2.32.5
+yfinance==0.2.40
+pyyaml==6.0.1
+pyarrow==21.0.0
