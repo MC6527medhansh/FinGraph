@@ -29,5 +29,4 @@ EXPOSE 8000
 ENV PORT=8000
 
 # Start Streamlit
-CMD ["python", "-m", "streamlit", "run", "src/dashboard/app.py", \
-     "--server.port", "8000", "--server.address", "0.0.0.0"]
+CMD ["sh","-lc","python -m streamlit run src/dashboard/app.py --server.port ${PORT:-8000} --server.address 0.0.0.0"]
