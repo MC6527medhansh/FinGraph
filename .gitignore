@@ -160,7 +160,7 @@ data/external/
 
 # Models & experiment outputs
 data/models/
-models/
+# models/
 models/checkpoints/
 models/production/
 outputs/

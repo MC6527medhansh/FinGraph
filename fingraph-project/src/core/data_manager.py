@@ -131,8 +131,31 @@ class UnifiedDataManager:
             if cached_data is not None:
                 logger.info("Using cached data")
                 return cached_data
+            
+            # No pickle cache - try loading from raw CSV files
+            logger.info("No cache found, checking for raw CSV files...")
+            self.price_data = self._load_from_raw_files()
+            
+            if self.price_data is not None:
+                logger.info("Successfully loaded from raw CSV files")
+                
+                # Validate and prepare
+                self._validate_data_quality()
+                metadata = self._calculate_metadata()
+                
+                data_package = {
+                    'prices': self.price_data,
+                    'metadata': metadata,
+                    'config': self.config
+                }
+                
+                # Save to cache for next time
+                self.cache.set(cache_key, data_package, metadata)
+                logger.info("Cached data for future runs")
+                
+                return data_package
         
-        # Download fresh data
+        # Download fresh data (this will hit Yahoo rate limit currently)
         logger.info("Downloading fresh data")
         self.price_data = self._download_price_data()
         
@@ -154,6 +177,51 @@ class UnifiedDataManager:
             self.cache.set(cache_key, data_package, metadata)
         
         return data_package
+    
+    def _load_from_raw_files(self) -> Optional[pd.DataFrame]:
+        """Load data from raw CSV files if they exist"""
+        raw_dir = Path(self.config['paths']['data_dir']) / 'raw'
+        
+        if not raw_dir.exists():
+            return None
+        
+        # Look for stock_data CSV files
+        csv_files = list(raw_dir.glob('stock_data_*.csv'))
+        
+        if not csv_files:
+            return None
+        
+        # Use the most recent file
+        latest_csv = max(csv_files, key=lambda x: x.stat().st_mtime)
+        
+        logger.info(f"Loading data from {latest_csv.name}")
+        
+        try:
+            data = pd.read_csv(latest_csv)
+            
+            # Ensure date column exists and is datetime
+            if 'date' in data.columns:
+                data['date'] = pd.to_datetime(data['date'])
+                data = data.set_index('date')
+            elif 'Date' in data.columns:
+                data['Date'] = pd.to_datetime(data['Date'])
+                data = data.set_index('Date')
+                data.index.name = 'date'
+            
+            # Standardize column names to lowercase
+            data.columns = [col.lower() for col in data.columns]
+            
+            # Ensure symbol column exists
+            if 'symbol' not in data.columns:
+                logger.error("No symbol column in CSV file")
+                return None
+            
+            logger.info(f"Loaded {len(data)} rows from raw CSV")
+            return data
+            
+        except Exception as e:
+            logger.error(f"Failed to load CSV: {e}")
+            return None
     
     def _download_price_data(self) -> pd.DataFrame:
         """Download price data for all symbols - fixed version"""

@@ -9,10 +9,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
 from datetime import datetime
-import subprocess
 
 if not os.path.exists('data/signals/latest_signals.csv'):
-    subprocess.run(['python', 'scripts/generate_signals.py'])
+    st.warning("No signals found. Please run signal generation first.")
     
 # Production detection
 IS_PRODUCTION = os.environ.get('RENDER', False)
@@ -72,33 +71,88 @@ def load_health_status():
 
 
 def refresh_signals():
-    """Trigger signal regeneration"""
-    with st.spinner('Generating fresh signals... This may take a minute.'):
-        try:
-            result = subprocess.run(
-                ['python', 'scripts/generate_signals.py'],
-                capture_output=True,
-                text=True,
-                timeout=120
-            )
-            if result.returncode == 0:
-                st.success("✅ Signals refreshed successfully!")
-                st.cache_data.clear()
-                return True
-            else:
-                st.error(f"Error generating signals: {result.stderr}")
-                return False
-        except subprocess.TimeoutExpired:
-            st.error("Signal generation timed out")
+    """Run signal generation with real-time progress"""
+    
+    # Add project root to path
+    project_root = Path(__file__).parent.parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    
+    try:
+        # Import after path is set
+        from scripts.generate_signals import SignalGenerator
+        
+        # Create progress display
+        status_text = st.empty()
+        progress_bar = st.progress(0)
+        
+        # Progress tracking
+        steps = []
+        current_step = [0]  # Use list to modify in nested function
+        total_steps = 8  # Expected number of progress updates
+        
+        def update_progress(message: str):
+            """Callback for progress updates"""
+            steps.append(message)
+            current_step[0] += 1
+            
+            status_text.text(f"Step {current_step[0]}/{total_steps}: {message}")
+            progress_bar.progress(min(current_step[0] / total_steps, 1.0))
+        
+        # Initialize generator with progress callback
+        generator = SignalGenerator(progress_callback=update_progress)
+        
+        # Generate signals
+        signals = generator.generate_current_signals()
+        
+        if signals.empty:
+            st.error("Signal generation returned no results")
             return False
-        except Exception as e:
-            st.error(f"Error: {str(e)}")
-            return False
+        
+        # Save signals
+        update_progress("Saving signals to disk...")
+        generator.save_signals(signals)
+        
+        # Complete
+        progress_bar.progress(1.0)
+        status_text.text("✅ Signal generation complete!")
+        
+        # Clear cache
+        st.cache_data.clear()
+        
+        # Show summary
+        with st.expander("Generation Summary", expanded=True):
+            st.write("**Steps completed:**")
+            for i, step in enumerate(steps, 1):
+                st.write(f"{i}. {step}")
+            
+            st.write("\n**Signal Statistics:**")
+            st.write(f"- Total stocks analyzed: {len(signals)}")
+            st.write(f"- Strong Buy signals: {(signals['recommendation'] == 'STRONG_BUY').sum()}")
+            st.write(f"- Buy signals: {(signals['recommendation'] == 'BUY').sum()}")
+            st.write(f"- Top pick: {signals.sort_values('rank').iloc[0]['symbol']}")
+        
+        st.success("🎉 Signals refreshed successfully! Dashboard will reload...")
+        return True
+        
+    except ImportError as e:
+        st.error(f"Import failed: {str(e)}")
+        st.info("Make sure you're running from the project root and all dependencies are installed")
+        with st.expander("Troubleshooting"):
+            st.code(f"Project root: {project_root}\nPython path: {sys.path[:3]}")
+        return False
+        
+    except Exception as e:
+        st.error(f"Signal generation failed: {str(e)}")
+        with st.expander("Error Details"):
+            import traceback
+            st.code(traceback.format_exc())
+        return False
 
 
 def main():
     # Header
-    st.title("📈 FinGraph Trading Signals Dashboard")
+    st.title("FinGraph Trading Signals Dashboard")
     
     # Sidebar
     with st.sidebar:
@@ -182,7 +236,7 @@ def main():
     # Signal Tables
     st.header("Trading Signals")
     
-    tab1, tab2, tab3 = st.tabs(["📊 Buy Signals", "📉 Sell Signals", "📈 All Signals"])
+    tab1, tab2, tab3 = st.tabs(["Buy Signals", "Sell Signals", "All Signals"])
     
     with tab1:
         buy_signals = signals[signals['recommendation'].isin(['STRONG_BUY', 'BUY'])]

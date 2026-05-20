@@ -13,13 +13,13 @@ import torch
 import pandas as pd
 from datetime import datetime
 import logging
-from typing import Dict
+from typing import Dict, Callable, Optional
 import yaml
 
 from src.models.gnn_model import FinancialGNN
 from src.pipeline.graph_builder import TemporalGraphBuilder
-from src.core.data_manager import UnifiedDataManager           # << unified name
-from src.core.feature_engine import UnifiedFeatureEngine       # << unified name
+from src.core.data_manager import UnifiedDataManager
+from src.core.feature_engine import UnifiedFeatureEngine
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,7 +28,12 @@ logger = logging.getLogger(__name__)
 class SignalGenerator:
     """Generate daily trading signals from trained model"""
 
-    def __init__(self, config_path: str = 'config/pipeline_config.yaml'):
+    def __init__(self, config_path: str = 'config/pipeline_config.yaml', 
+                 progress_callback: Optional[Callable[[str], None]] = None):
+        self.progress_callback = progress_callback
+        
+        self._report_progress("Initializing signal generator...")
+        
         with open(project_root / config_path, 'r') as f:
             self.config = yaml.safe_load(f)
 
@@ -37,7 +42,14 @@ class SignalGenerator:
         self.graph_builder = TemporalGraphBuilder(self.config)
 
         # Load latest model
+        self._report_progress("Loading trained model...")
         self.model, self.ckpt_meta = self._load_latest_model()
+        
+    def _report_progress(self, message: str):
+        """Report progress to callback if provided"""
+        if self.progress_callback:
+            self.progress_callback(message)
+        logger.info(message)
 
     def _load_latest_model(self):
         """Load the most recent trained model & align input dims safely."""
@@ -49,7 +61,7 @@ class SignalGenerator:
         logger.info(f"Loading model: {latest_model.name}")
 
         ckpt = torch.load(latest_model, map_location='cpu', weights_only=False)
-        meta = ckpt.get('metadata', {})  # we saved this in your trainer
+        meta = ckpt.get('metadata', {})
         train_feature_names = meta.get('feature_names')
         n_in = meta.get('num_features')
 
@@ -71,9 +83,10 @@ class SignalGenerator:
 
     def generate_current_signals(self) -> pd.DataFrame:
         """Generate signals for the most recent valid feature date (prediction path, no labels)."""
-        logger.info("Generating current signals...")
+        self._report_progress("Starting signal generation...")
 
         # 1) Load full price history
+        self._report_progress("Downloading market data (this may take 5-10 minutes)...")
         pkg = self.data_manager.load_all_data(use_cache=False)
         prices = pkg['prices'].copy()
 
@@ -86,11 +99,12 @@ class SignalGenerator:
             return pd.DataFrame()
 
         # 2) Build prediction-only features for the latest trading day
+        self._report_progress("Calculating technical indicators...")
         asof = prices.index.max()
         from pandas.tseries.offsets import BDay
         today = pd.Timestamp.now().normalize()
         days_stale = (today - asof.normalize()).days
-        if days_stale > 2:  # tolerate weekend/holiday
+        if days_stale > 2:
             logger.warning(f"Signals are {days_stale} days old (as-of {asof.date()}). Market may be closed or data delayed.")
 
         features_pred = self.feature_engine.create_features_for_prediction(
@@ -101,40 +115,40 @@ class SignalGenerator:
             logger.error("Prediction feature creation returned empty.")
             return pd.DataFrame()
 
-        # 3) Reorder/align columns to exactly match training schema (no leakage cols)
-        # Training feature order = metadata saved at training time
-        train_feature_names = self.ckpt_meta['feature_names']  # list[str], includes ONLY model inputs at train time
+        # 3) Reorder/align columns to exactly match training schema
+        self._report_progress("Aligning feature schema...")
+        train_feature_names = self.ckpt_meta['feature_names']
         have_cols = set(features_pred.columns)
 
         cols_missing = [c for c in train_feature_names if c not in have_cols]
-        cols_extra   = [c for c in features_pred.columns if c not in train_feature_names + ['date','symbol']]
+        cols_extra = [c for c in features_pred.columns if c not in train_feature_names + ['date','symbol']]
 
         if cols_extra:
-            # Drop any accidental new cols
             features_pred = features_pred.drop(columns=cols_extra)
 
-        # Add any missing expected cols as zeros (defensive)
         for c in cols_missing:
             logger.warning(f"Prediction features missing expected column '{c}'. Filling with zeros.")
             features_pred[c] = 0.0
 
-        # Final column order: date, symbol, then training feature order
         features_pred = features_pred[['date', 'symbol'] + train_feature_names]
 
         logger.info(f"Generating signals for date: {asof}")
 
-        # 4) Build graph for prediction (no labels)
+        # 4) Build graph for prediction
+        self._report_progress("Building relationship graph...")
         graph = self.graph_builder.build_graph_for_prediction(features_pred, asof)
         if graph is None:
             logger.error(f"Failed to build graph for date {asof}")
             return pd.DataFrame()
 
         # 5) Inference
+        self._report_progress("Running model inference...")
         self.model.eval()
         with torch.no_grad():
             outputs = self.model(graph.x, graph.edge_index, graph.edge_attr)
 
         # 6) Assemble signal dataframe
+        self._report_progress("Generating trading recommendations...")
         signals = pd.DataFrame({
             'date': [asof] * len(graph.symbols),
             'symbol': graph.symbols,
@@ -143,7 +157,7 @@ class SignalGenerator:
             'volatility_forecast': outputs['volatility'].squeeze().cpu().numpy()
         })
 
-        # 7) Ranking & recommendations (safe math)
+        # 7) Ranking & recommendations
         signals['signal_strength'] = signals['return_forecast'] / (signals['risk_score'].astype(float) + 1e-2)
         signals['rank'] = signals['signal_strength'].rank(ascending=False, method='first')
 
@@ -156,6 +170,7 @@ class SignalGenerator:
         for col in ['risk_score', 'return_forecast', 'volatility_forecast', 'signal_strength']:
             signals[col] = signals[col].astype(float).round(6)
 
+        self._report_progress("Signal generation complete!")
         return signals
 
     def save_signals(self, signals: pd.DataFrame) -> Path:
